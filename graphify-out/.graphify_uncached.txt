@@ -1,0 +1,3 @@
+G:\App\AutoClip\README.md
+G:\App\AutoClip\examples\config.yaml
+G:\App\AutoClip\requirements.txt

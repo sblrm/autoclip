@@ -1,0 +1,54 @@
+- main [ref=e4]:
+  - generic [ref=e5]:
+    - generic [ref=e10]:
+      - strong [ref=e11]: AUTOCLIP
+      - generic [ref=e12]: LOCAL STUDIO
+    - generic [ref=e13]:
+      - generic [ref=e14]: 100% lokal
+      - button "EN" [ref=e17] [cursor=pointer]
+  - generic [ref=e18]:
+    - generic [ref=e19]:
+      - generic [ref=e20]: Pusat setup
+      - heading "Potong video pertama, tanpa menebak setup." [level=1] [ref=e23]
+      - paragraph [ref=e24]: AutoClip bekerja sepenuhnya di perangkat Anda. Cek mesin, pasang kebutuhan, lalu mulai edit.
+      - generic [ref=e25]:
+        - generic [ref=e29]:
+          - strong [ref=e30]: Perlu setup
+          - paragraph [ref=e31]: 0 kebutuhan wajib perlu perhatian.
+        - button "Cek ulang" [ref=e32] [cursor=pointer]
+      - region [ref=e35]:
+        - generic [ref=e36]:
+          - paragraph [ref=e37]: Mulai dari sini
+          - heading "Alur kerja jelas" [level=2] [ref=e38]
+          - paragraph [ref=e39]: Satu video. Satu subjek terkunci. Satu ekspor yang Anda setujui.
+        - list [ref=e40]:
+          - listitem [ref=e41]: 1. Siapkan mesin
+          - listitem [ref=e42]: 2. Impor video
+          - listitem [ref=e43]: 3. Analisis klip
+          - listitem [ref=e44]: 4. Kunci subjek
+          - listitem [ref=e45]: 5. Setujui dan ekspor
+      - region "Komponen" [ref=e46]:
+        - generic [ref=e47]:
+          - generic [ref=e48]:
+            - paragraph [ref=e49]: Mesin
+            - heading "Local engine check" [level=2] [ref=e50]
+          - generic [ref=e51]: 0 checks
+    - complementary [ref=e52]:
+      - generic [ref=e53]:
+        - generic [ref=e54]: Perangkat keras
+        - paragraph [ref=e58]: GPU NVIDIA tidak terdeteksi
+        - generic [ref=e59]:
+          - generic [ref=e60]:
+            - term [ref=e61]: Terdeteksi
+            - definition [ref=e62]: —
+          - generic [ref=e63]:
+            - term [ref=e64]: Whisper
+            - definition [ref=e65]: CPU
+          - generic [ref=e66]:
+            - term [ref=e67]: Face tracking
+            - definition [ref=e68]: CPU
+      - generic [ref=e72]:
+        - heading "Instalasi terkendali" [level=2] [ref=e73]
+        - paragraph [ref=e74]: Tidak ada perintah tersembunyi. Setup hanya menjalankan pemasang lokal yang diizinkan.
+      - button "Buka studio" [disabled] [ref=e75]
+      - paragraph [ref=e78]: Selesaikan kebutuhan wajib untuk membuka studio.

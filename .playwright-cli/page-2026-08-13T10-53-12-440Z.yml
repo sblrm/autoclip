@@ -1,0 +1,39 @@
+- main [ref=e3]:
+  - generic [ref=e4]:
+    - complementary [ref=e5]:
+      - generic [ref=e6]:
+        - generic [ref=e11]:
+          - paragraph [ref=e12]: AUTOCLIP
+          - paragraph [ref=e13]: LOCAL STUDIO
+        - button "EN" [ref=e14] [cursor=pointer]
+      - navigation [ref=e15]:
+        - paragraph [ref=e16]: PERPUSTAKAAN PROYEK
+      - generic [ref=e18]:
+        - generic [ref=e19]: LOCAL ENGINE
+        - generic [ref=e20]: ONLINE
+    - generic [ref=e23]:
+      - generic [ref=e24]:
+        - generic [ref=e28]:
+          - paragraph [ref=e29]: Proyek baru
+          - paragraph [ref=e30]: LOCAL-ONLY / 9:16
+        - generic [ref=e31]: CPU
+      - generic [ref=e34]:
+        - generic [ref=e35]:
+          - paragraph [ref=e36]: 01 / SUMBER
+          - heading "Mulai dengan satu video" [level=1] [ref=e37]
+          - paragraph [ref=e38]: AutoClip menyimpan salinan lokal, lalu mengubahnya menjadi ruang review yang bisa dilanjutkan kapan saja.
+        - generic [ref=e39]:
+          - button "Pilih video lokal MP4 · MOV · M4V · WEBM" [ref=e40] [cursor=pointer]:
+            - generic [ref=e43]: Pilih video lokal
+            - generic [ref=e44]: MP4 · MOV · M4V · WEBM
+          - generic [ref=e45]:
+            - generic [ref=e48]: Tautan video
+            - textbox "https://…" [ref=e49]
+            - button "Gunakan tautan →" [disabled] [ref=e50]
+    - complementary [ref=e51]:
+      - generic [ref=e52]:
+        - generic [ref=e53]:
+          - paragraph [ref=e54]: Inspektur crop
+          - paragraph [ref=e55]: —
+        - button "Kesehatan runtime" [ref=e56] [cursor=pointer]
+      - generic [ref=e59]: AutoClip menyimpan salinan lokal, lalu mengubahnya menjadi ruang review yang bisa dilanjutkan kapan saja.

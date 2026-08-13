@@ -1,0 +1,87 @@
+# AutoClip Example Configuration
+# Copy this file to ~/.autoclip/config.yaml or run: autoclip init
+
+# ── Whisper Transcription (affects subtitle accuracy) ────────────────────────
+# Tip: Akurasi subtitle paling dipengaruhi oleh model + bahasa eksplisit.
+#   Gunakan "large-v3" untuk akurasi tertinggi (butuh ~3GB VRAM / RAM).
+#   Untuk konten bahasa Indonesia, set language: "id".
+#   Untuk konten Inggris,               set language: "en".
+#   Campur Indo-Inggris,                set language: "id" (Whisper tetap bisa handle).
+whisper:
+  model: base          # tiny | base | small | medium | large-v3  ← naikkan ini untuk akurasi lebih
+  language: null       # null = auto-detect | "id" = Indonesia | "en" = Inggris
+  device: cuda         # cpu | cuda
+  word_timestamps: true
+  fp16: true
+
+ollama:
+  model: gemma4:e4b     # run `ollama pull gemma4:e4b` first
+  host: http://localhost:11434
+  timeout: 120
+  temperature: 0.3
+  num_ctx: 65536
+
+output:
+  format: "9:16"
+  width: 1080
+  height: 1920
+  directory: ./autoclip_output
+  video_codec: libx264
+  audio_codec: aac
+  crf: 23
+  audio_bitrate: "128k"
+
+clip:
+  min_duration: 30
+  max_duration: 90
+  max_clips: 10
+  min_score: 6
+  overlap_tolerance: 5.0
+
+subtitle:
+  enabled: true
+  font: Arial
+  # font_size dikalibrasi untuk PlayResY 1920 (video 1080x1920):
+  #   18  = terlalu kecil (hampir tidak terlihat)
+  #   50  = kecil, cocok untuk subtitle bawah layar biasa
+  #   80  = bold karaoke style (TikTok/Reels/Shorts) ← default
+  #   100 = sangat besar, cocok untuk highlight 1-2 kata
+  font_size: 80
+  primary_color: "&H00FFFFFF"     # putih
+  highlight_color: "&H0000FFFF"   # kuning (kata yang aktif)
+  outline_color: "&H00000000"     # outline hitam
+  shadow_color: "&H80000000"      # shadow semi-transparan
+  bold: true
+  outline_size: 4          # ketebalan outline (naikan jika background terang)
+  shadow_distance: 3
+  position: bottom         # top | middle | bottom
+  margin_v: 120            # jarak dari tepi bawah (dalam pixel PlayRes)
+  words_per_line: 4        # kata per baris (lebih sedikit = teks lebih besar & jelas)
+  uppercase: false         # true = TEKS KAPITAL SEMUA (gaya TikTok viral)
+
+
+# ── Face Tracking Smart Crop ────────────────────────────────────────────────
+# Requires: pip install opencv-python mediapipe
+# When enabled, the crop follows the speaker's face instead of center-cropping.
+# Ideal for podcasts, interviews, and single-speaker content.
+tracker:
+  enabled: false
+
+  # ── Anti-jitter settings (tuning ini penting kalau hasil goyang-goyang) ──
+  ema_alpha: 0.04           # Kelembaman crop: lebih kecil = lebih smooth tapi lambat
+                            #   0.02 = sangat smooth / sinematik
+                            #   0.04 = default, seimbang (recommended)
+                            #   0.08 = lebih responsif, bisa agak jitter
+
+  sample_every_n_frames: 15 # Deteksi wajah setiap N frame
+                            #   6  = sering, akurat tapi lebih mudah jitter
+                            #   15 = default, balance (recommended)
+                            #   30 = jarang, sangat smooth, kurang responsif
+
+  deadzone_fraction: 0.04   # Wajah harus bergerak >4% lebar frame sebelum crop ikut
+                            #   0.0  = tidak ada deadzone, selalu mengikuti
+                            #   0.04 = default, tidak goyang karena noise deteksi
+                            #   0.08 = crop lebih "malas", cocok untuk speaker diam
+
+  use_mediapipe: true       # true = MediaPipe (akurat), false = OpenCV Haar (fallback)
+

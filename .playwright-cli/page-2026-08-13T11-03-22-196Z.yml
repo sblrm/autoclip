@@ -1,0 +1,83 @@
+- main [ref=f1e3]:
+  - generic [ref=f1e4]:
+    - complementary [ref=f1e5]:
+      - generic [ref=f1e6]:
+        - generic [ref=f1e11]:
+          - paragraph [ref=f1e12]: AUTOCLIP
+          - paragraph [ref=f1e13]: LOCAL STUDIO
+        - button "EN" [ref=f1e14] [cursor=pointer]
+      - navigation [ref=f1e15]:
+        - paragraph [ref=f1e16]: PERPUSTAKAAN PROYEK
+        - button "two_people_pixabay draft" [ref=f1e61] [cursor=pointer]:
+          - generic [ref=f1e64]:
+            - generic [ref=f1e65]: two_people_pixabay
+            - generic [ref=f1e66]: draft
+      - generic [ref=f1e18]:
+        - generic [ref=f1e19]: LOCAL ENGINE
+        - generic [ref=f1e20]: ONLINE
+    - generic [ref=f1e23]:
+      - generic [ref=f1e24]:
+        - generic [ref=f1e28]:
+          - paragraph [ref=f1e29]: two_people_pixabay
+          - paragraph [ref=f1e30]: 1 Kandidat klip
+        - generic [ref=f1e31]:
+          - generic [ref=f1e32]: CPU
+          - button "Analisis klip" [ref=f1e67] [cursor=pointer]
+      - generic [ref=f1e70]:
+        - generic [ref=f1e71]:
+          - generic [ref=f1e72]:
+            - generic [ref=f1e73]: Ruang edit
+            - generic [ref=f1e74]: 9:16 / MP4
+          - generic [ref=f1e141]:
+            - generic [ref=f1e144]: Completed
+            - generic [ref=f1e145]: 100%
+        - generic [ref=f1e81]:
+          - generic [ref=f1e82]:
+            - generic [ref=f1e83]: Kandidat klip
+            - generic [ref=f1e84]: 1 CUTS
+          - button "90 Two people smoke clip" [ref=f1e86] [cursor=pointer]:
+            - generic [ref=f1e87]: "90"
+            - generic [ref=f1e88]: Two people smoke clip
+          - generic [ref=f1e89]:
+            - generic [ref=f1e90]: 00:00.0 — 00:01.5
+            - generic [ref=f1e106]: 2 subjects
+    - complementary [ref=f1e51]:
+      - generic [ref=f1e52]:
+        - generic [ref=f1e53]:
+          - paragraph [ref=f1e54]: Inspektur crop
+          - paragraph [ref=f1e55]: preview_ready
+        - button "Kesehatan runtime" [ref=f1e56] [cursor=pointer]
+      - generic [ref=f1e59]:
+        - generic [ref=f1e107]:
+          - generic [ref=f1e108]: Judul klip
+          - textbox [ref=f1e109]: Two people smoke clip
+        - generic [ref=f1e110]:
+          - generic [ref=f1e111]:
+            - generic [ref=f1e112]: Masuk
+            - spinbutton [ref=f1e113]: "0"
+          - generic [ref=f1e114]:
+            - generic [ref=f1e115]: Keluar
+            - spinbutton [ref=f1e116]: "1.5"
+        - generic [ref=f1e117]:
+          - generic [ref=f1e118]: Pilih subjek
+          - generic [ref=f1e146]:
+            - button "Subject 1 97% CONF." [ref=f1e147] [cursor=pointer]:
+              - generic [ref=f1e148]:
+                - generic [ref=f1e149]: Subject 1
+                - generic [ref=f1e150]: 97% CONF.
+            - button "Subject 2 92% CONF." [ref=f1e153] [cursor=pointer]:
+              - generic [ref=f1e154]:
+                - generic [ref=f1e155]: Subject 2
+                - generic [ref=f1e156]: 92% CONF.
+        - generic [ref=f1e123]:
+          - generic [ref=f1e124]:
+            - generic [ref=f1e125]: Gap pelacakan
+            - generic [ref=f1e126]: "0"
+          - paragraph [ref=f1e127]: No persisted subject loss.
+        - generic [ref=f1e128]:
+          - button "Buat pratinjau" [ref=f1e162] [cursor=pointer]
+          - button "Setujui pratinjau" [disabled] [ref=f1e132]
+          - button "Ekspor 9:16" [ref=f1e135] [cursor=pointer]
+        - generic [ref=f1e138]:
+          - paragraph [ref=f1e139]: Riwayat ekspor
+          - paragraph [ref=f1e140]: —

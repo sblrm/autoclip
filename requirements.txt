@@ -1,0 +1,36 @@
+# AutoClip Python dependencies
+# Generated from pyproject.toml
+# Install with: pip install -r requirements.txt --index-url https://pypi.org/simple
+
+# Core AI/ML — torch CPU-only (no triton, works on Windows)
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch>=2.1.0
+torchaudio>=2.1.0
+
+# Speech recognition
+openai-whisper>=20231117
+
+# Video download
+yt-dlp>=2024.1.0
+
+# Local LLM
+ollama>=0.1.0
+
+# CLI & UI
+typer>=0.12.0
+rich>=13.7.0
+
+# Config & validation
+pyyaml>=6.0.1
+pydantic>=2.5.0
+
+# Numeric
+numpy>=1.26.0,<3.0.0
+
+# Build dependency (required by openai-whisper on Python 3.12+)
+setuptools>=68.0.0
+
+# Face tracking (optional — required for --face-track / tracker.enabled = true)
+# Install with: pip install opencv-python mediapipe
+opencv-python>=4.8.0
+mediapipe>=0.10.0

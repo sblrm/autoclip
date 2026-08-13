@@ -1,0 +1,89 @@
+[tool.poetry]
+name = "autoclip"
+version = "0.1.0"
+description = "AI-powered CLI tool that automatically clips long videos into viral short-form content"
+authors = []
+license = "MIT"
+readme = "README.md"
+homepage = "https://github.com/your-org/autoclip"
+repository = "https://github.com/your-org/autoclip"
+keywords = ["video", "ai", "clips", "tiktok", "youtube-shorts", "reels", "content-creator"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Multimedia :: Video",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+packages = [{include = "autoclip"}]
+
+[tool.poetry.dependencies]
+python = "^3.10"
+# setuptools provides pkg_resources — required by openai-whisper's setup.py on Python 3.12+
+setuptools = ">=68.0.0"
+# Whisper requires torch — use CPU-only build to avoid triton (Linux-only CUDA kernel)
+torch = {version = ">=2.1.0,<3.0.0", source = "pytorch-cpu"}
+torchaudio = {version = ">=2.1.0,<3.0.0", source = "pytorch-cpu"}
+# triton is a Linux-only CUDA kernel — no Windows wheels exist; exclude explicitly
+triton = {version = ">=2.0.0,<3.0.0", markers = "sys_platform == 'linux'"}
+openai-whisper = "^20231117"
+yt-dlp = ">=2024.1.0"
+ollama = ">=0.1.0"
+typer = ">=0.12.0"
+rich = "^13.7.0"
+pyyaml = "^6.0.1"
+pydantic = "^2.5.0"
+numpy = ">=1.26.0,<3.0.0"
+# Face tracking (optional) — used for smart crop that follows the speaker's face
+mediapipe = {version = ">=0.10.0", optional = true}
+opencv-python = {version = ">=4.8.0", optional = true}
+
+[tool.poetry.extras]
+# Install all face-tracking dependencies: poetry install --extras face-track
+# or: pip install autoclip[face-track]
+face-track = ["mediapipe", "opencv-python"]
+# Legacy alias
+layout = ["mediapipe", "opencv-python"]
+
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^7.4.0"
+pytest-cov = "^4.1.0"
+pytest-mock = "^3.12.0"
+ruff = "^0.1.9"
+mypy = "^1.8.0"
+types-pyyaml = "^6.0.12"
+
+[tool.poetry.scripts]
+autoclip = "autoclip.cli:app"
+
+# PyTorch CPU-only index — avoids triton (Linux CUDA kernel, no Windows wheels)
+[[tool.poetry.source]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+priority = "explicit"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+select = ["E", "F", "I", "N", "W", "UP"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = false
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --tb=short"
+filterwarnings = ["ignore::DeprecationWarning"]
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
