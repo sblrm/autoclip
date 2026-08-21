@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
@@ -9,7 +10,35 @@ import pytest
 
 from autoclip.core.clipper import _build_output_path, _sanitize_title
 from autoclip.models.clip import Clip
-from autoclip.models.config import OutputConfig
+from autoclip.models.config import OutputConfig, TrackerConfig
+from autoclip.utils.ffmpeg import VideoInfo
+from autoclip.web.acceleration import (
+    AccelerationStatus,
+    EncoderUnavailable,
+    EngineProbe,
+    TrackerUnavailable,
+)
+
+
+def _manager_returning(status: AccelerationStatus):
+    class StaticAccelerationManager:
+        def status(self) -> AccelerationStatus:
+            return status
+
+    return StaticAccelerationManager
+
+
+def _video_info(video: Path) -> VideoInfo:
+    return VideoInfo(
+        path=video,
+        width=1920,
+        height=1080,
+        duration=600.0,
+        fps=30.0,
+        video_codec="h264",
+        audio_codec="aac",
+        size_bytes=1_000_000,
+    )
 
 
 # ─── Title Sanitization ───────────────────────────────────────────────────────
@@ -154,3 +183,278 @@ class TestCreateClips:
         )
 
         assert mock_ffmpeg.call_count == len(sample_clips)
+
+    def test_explicit_gpu_tracker_unavailable_never_reaches_export(
+        self,
+        monkeypatch,
+        tmp_path,
+        sample_clip,
+    ):
+        from autoclip.core import clipper
+
+        video = tmp_path / "video.mp4"
+        video.write_bytes(b"fake")
+        status = AccelerationStatus.for_test(
+            platform="Windows",
+            engines={
+                "yunet_cuda": EngineProbe(
+                    state="missing",
+                    provider="CUDAExecutionProvider",
+                    model_id="yunet_2023mar",
+                    reason="model is not installed",
+                ),
+            },
+            encoders={"libx264": "ready"},
+        )
+        export_calls: list[str] = []
+        monkeypatch.setattr(
+            clipper,
+            "AccelerationManager",
+            _manager_returning(status),
+            raising=False,
+        )
+        monkeypatch.setattr(
+            clipper,
+            "_probe_encoder_capabilities",
+            lambda: status.encoders,
+            raising=False,
+        )
+        monkeypatch.setattr(clipper, "get_video_info", lambda _path: _video_info(video))
+        monkeypatch.setattr(
+            clipper,
+            "_export_clip_tracked",
+            lambda **_kwargs: export_calls.append("tracked"),
+        )
+        monkeypatch.setattr(
+            clipper,
+            "_export_clip",
+            lambda **_kwargs: export_calls.append("static"),
+        )
+
+        with pytest.raises(TrackerUnavailable) as caught:
+            clipper.create_clips(
+                video_path=video,
+                clips=[sample_clip],
+                output_dir=tmp_path / "output",
+                output_config=OutputConfig(),
+                tracker_config=TrackerConfig(enabled=True, engine="yunet_cuda"),
+            )
+
+        assert "tracker_error: engine=yunet_cuda state=missing" in str(caught.value)
+        assert "autoclip web" in str(caught.value)
+        assert export_calls == []
+
+    def test_explicit_unavailable_nvenc_never_uses_static_export(
+        self,
+        monkeypatch,
+        tmp_path,
+        sample_clip,
+    ):
+        from autoclip.core import clipper
+
+        video = tmp_path / "video.mp4"
+        video.write_bytes(b"fake")
+        status = AccelerationStatus.for_test(
+            platform="Windows",
+            encoders={
+                "h264_nvenc": {"state": "failed", "reason": "live smoke failed"},
+                "libx264": "ready",
+            },
+        )
+        export_calls: list[str] = []
+        monkeypatch.setattr(
+            clipper,
+            "AccelerationManager",
+            _manager_returning(status),
+            raising=False,
+        )
+        monkeypatch.setattr(
+            clipper,
+            "_probe_encoder_capabilities",
+            lambda: status.encoders,
+            raising=False,
+        )
+        monkeypatch.setattr(clipper, "get_video_info", lambda _path: _video_info(video))
+        monkeypatch.setattr(
+            clipper,
+            "_export_clip",
+            lambda **_kwargs: export_calls.append("static"),
+        )
+
+        with pytest.raises(EncoderUnavailable, match=r"nvenc_error.*live smoke failed"):
+            clipper.create_clips(
+                video_path=video,
+                clips=[sample_clip],
+                output_dir=tmp_path / "output",
+                output_config=OutputConfig(encoder_mode="h264_nvenc"),
+                tracker_config=TrackerConfig(enabled=False),
+            )
+
+        assert export_calls == []
+
+    def test_tracker_disabled_keeps_center_crop_and_auto_ignores_legacy_codec(
+        self,
+        monkeypatch,
+        tmp_path,
+        sample_clip,
+    ):
+        from autoclip.core import clipper
+
+        video = tmp_path / "video.mp4"
+        video.write_bytes(b"fake")
+        status = AccelerationStatus.for_test(
+            platform="Windows",
+            encoders={"h264_nvenc": "missing", "libx264": "ready"},
+        )
+        ffmpeg_calls: list[list[str]] = []
+        monkeypatch.setattr(
+            clipper,
+            "AccelerationManager",
+            _manager_returning(status),
+            raising=False,
+        )
+        monkeypatch.setattr(
+            clipper,
+            "_probe_encoder_capabilities",
+            lambda: status.encoders,
+            raising=False,
+        )
+        monkeypatch.setattr(clipper, "get_video_info", lambda _path: _video_info(video))
+        monkeypatch.setattr(
+            clipper,
+            "run_ffmpeg",
+            lambda args, **_kwargs: ffmpeg_calls.append(args),
+        )
+
+        clipper.create_clips(
+            video_path=video,
+            clips=[sample_clip],
+            output_dir=tmp_path / "output",
+            output_config=OutputConfig(
+                video_codec="h264_nvenc",
+                encoder_mode="auto",
+            ),
+            tracker_config=TrackerConfig(enabled=False),
+        )
+
+        args = ffmpeg_calls[0]
+        assert args[args.index("-c:v") + 1] == "libx264"
+        assert args[args.index("-vf") + 1].startswith("crop=")
+
+    def test_tracked_export_receives_resolved_nvenc_encoding(
+        self,
+        monkeypatch,
+        tmp_path,
+        sample_clip,
+    ):
+        from autoclip.core import clipper, tracker
+
+        video = tmp_path / "video.mp4"
+        video.write_bytes(b"fake")
+        status = AccelerationStatus.for_test(
+            platform="Windows",
+            engines={
+                "yunet_cuda": EngineProbe(
+                    state="ready",
+                    provider="CUDAExecutionProvider",
+                    model_id="yunet_2023mar",
+                ),
+            },
+            encoders={"h264_nvenc": "ready", "libx264": "ready"},
+        )
+        smart_crop_calls: list[dict[str, object]] = []
+        monkeypatch.setattr(
+            clipper,
+            "AccelerationManager",
+            _manager_returning(status),
+            raising=False,
+        )
+        monkeypatch.setattr(
+            clipper,
+            "_probe_encoder_capabilities",
+            lambda: status.encoders,
+            raising=False,
+        )
+        monkeypatch.setattr(clipper, "get_video_info", lambda _path: _video_info(video))
+        monkeypatch.setattr(
+            tracker,
+            "smart_crop_clip",
+            lambda **kwargs: smart_crop_calls.append(kwargs) or kwargs["output_path"],
+        )
+
+        clipper.create_clips(
+            video_path=video,
+            clips=[sample_clip],
+            output_dir=tmp_path / "output",
+            output_config=OutputConfig(encoder_mode="h264_nvenc"),
+            tracker_config=TrackerConfig(enabled=True, engine="yunet_cuda"),
+        )
+
+        assert len(smart_crop_calls) == 1
+        assert "encoding" in smart_crop_calls[0]
+        assert smart_crop_calls[0]["encoding"].mode == "h264_nvenc"
+        assert smart_crop_calls[0]["resolved_acceleration"].tracker_engine == "yunet_cuda"
+
+    def test_detector_factory_init_failure_escapes_without_static_export(
+        self,
+        monkeypatch,
+        tmp_path,
+        sample_clip,
+    ):
+        from autoclip.core import clipper
+
+        video = tmp_path / "video.mp4"
+        video.write_bytes(b"fake")
+        status = AccelerationStatus.for_test(
+            platform="Windows",
+            engines={
+                "yunet_cuda": EngineProbe(
+                    state="ready",
+                    provider="CUDAExecutionProvider",
+                    model_id="yunet_2023mar",
+                ),
+            },
+            encoders={"libx264": "ready"},
+        )
+        monkeypatch.setattr(clipper, "AccelerationManager", _manager_returning(status))
+        monkeypatch.setattr(clipper, "_probe_encoder_capabilities", lambda: status.encoders)
+        monkeypatch.setattr(clipper, "get_video_info", lambda _path: _video_info(video))
+        static_exports: list[str] = []
+        monkeypatch.setattr(
+            clipper,
+            "_export_clip",
+            lambda **_kwargs: static_exports.append("static"),
+        )
+
+        cv2 = MagicMock()
+        cv2.CAP_PROP_FPS = 5
+        cv2.CAP_PROP_FRAME_WIDTH = 3
+        cv2.CAP_PROP_FRAME_HEIGHT = 4
+        cv2.CAP_PROP_POS_MSEC = 0
+        capture = MagicMock()
+        capture.get.side_effect = lambda prop: {5: 30.0, 3: 1920, 4: 1080}.get(prop, 0)
+        cv2.VideoCapture.return_value = capture
+        monkeypatch.setitem(sys.modules, "cv2", cv2)
+
+        class FailingFactory:
+            def create(self, _resolution):
+                raise RuntimeError("CUDA session init failed")
+
+        monkeypatch.setattr(
+            "autoclip.web.detectors.DetectorFactory",
+            lambda: FailingFactory(),
+        )
+
+        with pytest.raises(
+            TrackerUnavailable,
+            match=r"tracker_error: engine=yunet_cuda state=failed.*autoclip web",
+        ):
+            clipper.create_clips(
+                video_path=video,
+                clips=[sample_clip],
+                output_dir=tmp_path / "output",
+                output_config=OutputConfig(),
+                tracker_config=TrackerConfig(enabled=True, engine="yunet_cuda"),
+            )
+
+        assert static_exports == []

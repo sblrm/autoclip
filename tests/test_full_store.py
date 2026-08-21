@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -110,6 +112,92 @@ def test_clip_tracking_resolution_validates_clip_and_trajectory_ids(store: FullS
         store.save_clip_tracking_resolution(clip.id, resolution, export.id)
 
 
+def test_clip_tracking_resolution_rejects_trajectory_from_another_clip_and_project(
+    store: FullStudioStore,
+) -> None:
+    project = store.create_from_url("https://example.test/video.mp4")
+    clip = _create_clip(store, project.id)
+    other_project = store.create_from_url("https://example.test/other.mp4")
+    other_clip = _create_clip(store, other_project.id)
+    other_trajectory = store.save_artifact(
+        other_project.id,
+        "tracking_trajectory",
+        Path("other-trajectory.json"),
+        clip_id=other_clip.id,
+    )
+
+    with pytest.raises(ValueError, match="does not belong"):
+        store.save_clip_tracking_resolution(
+            clip.id,
+            ResolvedAcceleration("yunet_cpu", "libx264", "CPUExecutionProvider", "yunet_2023mar"),
+            other_trajectory.id,
+        )
+
+
+def test_clip_tracking_resolution_locks_validation_and_upsert_transaction(
+    store: FullStudioStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = store.create_from_url("https://example.test/video.mp4")
+    clip = _create_clip(store, project.id)
+    trajectory = store.save_artifact(
+        project.id,
+        "tracking_trajectory",
+        Path("trajectory.json"),
+        clip_id=clip.id,
+    )
+    state = {"interleaving_delete_was_locked": False}
+    original_connect = store._connect
+
+    class InterleavingConnection:
+        def __init__(self) -> None:
+            self.connection = original_connect()
+
+        def __enter__(self) -> "InterleavingConnection":
+            self.connection.__enter__()
+            return self
+
+        def __exit__(self, *args: Any) -> Any:
+            return self.connection.__exit__(*args)
+
+        def execute(self, sql: str, parameters: tuple[Any, ...] = ()) -> Any:
+            cursor = self.connection.execute(sql, parameters)
+            normalized = " ".join(sql.split())
+            if normalized == "SELECT project_id, clip_id, kind FROM artifacts WHERE id = ?":
+                row = cursor.fetchone()
+                cursor.fetchall()
+                competitor = sqlite3.connect(store.database_path, timeout=0)
+                try:
+                    competitor.execute("DELETE FROM artifacts WHERE id = ?", (trajectory.id,))
+                    competitor.commit()
+                except sqlite3.OperationalError as error:
+                    if "locked" not in str(error).casefold():
+                        raise
+                    state["interleaving_delete_was_locked"] = True
+                finally:
+                    competitor.close()
+
+                class CachedCursor:
+                    @staticmethod
+                    def fetchone() -> Any:
+                        return row
+
+                return CachedCursor()
+            return cursor
+
+    monkeypatch.setattr(store, "_connect", InterleavingConnection)
+
+    saved = store.save_clip_tracking_resolution(
+        clip.id,
+        ResolvedAcceleration("yunet_cuda", "libx264", "CUDAExecutionProvider", "yunet_2023mar"),
+        trajectory.id,
+    )
+
+    assert state["interleaving_delete_was_locked"] is True
+    assert saved.trajectory_artifact_id == trajectory.id
+    assert store.list_artifacts(project.id)[0].id == trajectory.id
+
+
 def test_model_acknowledgement_records_plan_source_and_utc_timestamp(store: FullStudioStore) -> None:
     plan = ModelPlan(
         id="research-model",
@@ -129,6 +217,32 @@ def test_model_acknowledgement_records_plan_source_and_utc_timestamp(store: Full
     assert acknowledgement.source_url == plan.source_url
     assert acknowledgement.license == plan.license
     assert timestamp.utcoffset() == timedelta(0)
+
+
+def test_model_acknowledgement_persists_after_store_reopens(store: FullStudioStore) -> None:
+    plan = ModelPlan(
+        id="research-model",
+        label="Research model",
+        source_url="https://models.example.test/research.zip",
+        sha256="a" * 64,
+        bytes=10,
+        license="Non-commercial research only",
+        research_only=True,
+        destination_relative_path="research/model.onnx",
+    )
+    saved = store.save_model_acknowledgement(plan)
+
+    reopened = FullStudioStore(store.root)
+    with sqlite3.connect(reopened.database_path) as connection:
+        row = connection.execute(
+            """
+            SELECT plan_id, source_url, license, acknowledged_at
+            FROM model_acknowledgements WHERE plan_id = ?
+            """,
+            (plan.id,),
+        ).fetchone()
+
+    assert row == (plan.id, plan.source_url, plan.license, saved.acknowledged_at)
 
 
 def test_clear_tracking_data_removes_resolution_and_tracking_artifacts(store: FullStudioStore) -> None:

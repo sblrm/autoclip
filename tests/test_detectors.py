@@ -138,6 +138,64 @@ def test_yunet_detector_runs_rgb_float32_nchw_inference() -> None:
     assert tensor[0, :, 0, 0].tolist() == pytest.approx([1.0, 64 / 255, 0.0])
 
 
+def test_scrfd_detector_uses_insightface_input_and_anchored_output() -> None:
+    from autoclip.web.detectors import DetectorFactory
+
+    score_8 = np.zeros((1, 6400), dtype=np.float32)
+    score_8[0, 3240] = 0.95
+    bbox_8 = np.ones((1, 6400, 4), dtype=np.float32)
+    score_16 = np.zeros((1, 1600), dtype=np.float32)
+    score_32 = np.zeros((1, 400), dtype=np.float32)
+    bbox_16 = np.zeros((1, 1600, 4), dtype=np.float32)
+    bbox_32 = np.zeros((1, 400, 4), dtype=np.float32)
+    sessions = FakeSessionFactory(
+        ("CPUExecutionProvider",),
+        [score_8, score_16, score_32, bbox_8, bbox_16, bbox_32],
+    )
+    detector = DetectorFactory(session_factory=sessions).create(
+        ResolvedAcceleration(
+            "scrfd_cpu",
+            "libx264",
+            "CPUExecutionProvider",
+            "insightface_antelopev2_scrfd",
+        )
+    )
+    frame = np.zeros((640, 640, 3), dtype=np.uint8)
+    frame[:, :] = [0, 64, 255]
+
+    faces = detector.detect(frame, 7)
+
+    assert sessions.session is not None
+    tensor = sessions.session.feeds[0]["input"]
+    assert tensor.shape == (1, 3, 640, 640)
+    assert tensor[0, :, 0, 0].tolist() == pytest.approx(
+        [0.99609375, -0.49609375, -0.99609375],
+    )
+    assert [(face.cx, face.cy, face.confidence) for face in faces] == [
+        (0.5, 0.5, pytest.approx(0.95)),
+    ]
+
+
+def test_scrfd_detector_rejects_malformed_outputs_instead_of_no_face() -> None:
+    from autoclip.web.detectors import DetectorFactory
+
+    sessions = FakeSessionFactory(
+        ("CPUExecutionProvider",),
+        [np.empty((0, 5), dtype=np.float32)],
+    )
+    detector = DetectorFactory(session_factory=sessions).create(
+        ResolvedAcceleration(
+            "scrfd_cpu",
+            "libx264",
+            "CPUExecutionProvider",
+            "insightface_antelopev2_scrfd",
+        )
+    )
+
+    with pytest.raises(ValueError, match="InsightFace detector outputs"):
+        detector.detect(np.zeros((640, 640, 3), dtype=np.uint8), 7)
+
+
 def test_mediapipe_detector_passes_optional_delegate_and_keeps_video_mode(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: object,
@@ -197,6 +255,10 @@ def test_mediapipe_detector_passes_optional_delegate_and_keeps_video_mode(
         "model_asset_path": str(model_path),
         "delegate": delegate,
     }
-    assert captured["detector_options"].running_mode == "VIDEO"  # type: ignore[union-attr]
+    assert captured["detector_options"] == {
+        "base_options": captured["options"].base_options,  # type: ignore[union-attr]
+        "running_mode": "VIDEO",
+        "min_detection_confidence": 0.5,
+    }
     assert captured["timestamp_ms"] == 9
     assert captured["closed"] is True

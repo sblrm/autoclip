@@ -34,7 +34,7 @@ def test_setup_status_and_install_job_are_available_without_a_video_project(tmp_
 
     dist = tmp_path / "dist"
     dist.mkdir()
-    (dist / "ux.html").write_text("<main>Setup Center</main>", encoding="utf-8")
+    (dist / "index.html").write_text("<main>AutoClip Studio</main>", encoding="utf-8")
     manager = ReadyManager()
     app = create_usable_studio(tmp_path / "projects", dist=dist, setup_manager=manager)
     client = TestClient(app)
@@ -51,7 +51,34 @@ def test_setup_status_and_install_job_are_available_without_a_video_project(tmp_
     app.state.runner.stop()
 
     assert status.status_code == 200
+    assert client.get("/").text == "<main>AutoClip Studio</main>"
     assert status.json()["hardware"]["adapter"] == "NVIDIA GeForce RTX 5070"
     assert queued.status_code == 202
+    assert app.state.setup_manager is manager
     assert manager.installed == ["opencv"]
     assert job["stage"] == "completed"
+
+
+def test_usable_studio_accepts_local_pipeline_and_tracking_factories(tmp_path: Path) -> None:
+    from autoclip.web.usable_studio import create_usable_studio
+
+    class FakePipeline:
+        def __init__(self, store) -> None:
+            self.store = store
+
+    class FakeTracking:
+        def __init__(self, store) -> None:
+            self.store = store
+
+    dist = tmp_path / "static"
+    dist.mkdir()
+    (dist / "index.html").write_text("<main>AutoClip Studio</main>", encoding="utf-8")
+    app = create_usable_studio(
+        tmp_path / "projects",
+        dist=dist,
+        pipeline_factory=FakePipeline,
+        tracking_factory=FakeTracking,
+    )
+
+    assert isinstance(app.state.pipeline, FakePipeline)
+    assert isinstance(app.state.tracking, FakeTracking)

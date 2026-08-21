@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import inspect
 import io
+import json
 import zipfile
 from dataclasses import replace
 from pathlib import Path
@@ -115,6 +116,24 @@ def test_valid_cached_model_returns_without_downloading(tmp_path: Path, monkeypa
     assert downloader.calls == []
 
 
+def test_is_installed_validates_direct_model_payload(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = b"verified model"
+    plan = _plan_for(payload)
+    _install_test_plan(monkeypatch, plan)
+    destination = tmp_path / plan.destination_relative_path
+    destination.parent.mkdir(parents=True)
+    destination.write_bytes(payload)
+    manager = ModelManager(tmp_path, downloader=FakeDownloader(b"unused"))
+
+    assert manager.is_installed(plan.id) is True
+
+    destination.write_bytes(b"tampered model")
+    assert manager.is_installed(plan.id) is False
+
+
 def test_acknowledged_research_archive_is_extracted_atomically(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -122,15 +141,87 @@ def test_acknowledged_research_archive_is_extracted_atomically(
     archive = _zip_bytes({"det_2.5g.onnx": model})
     plan = _plan_for(archive, archive_member="det_2.5g.onnx")
     _install_test_plan(monkeypatch, plan)
+    downloader = FakeDownloader(archive)
+    manager = ModelManager(tmp_path, downloader=downloader)
 
-    installed = ModelManager(tmp_path, downloader=FakeDownloader(archive)).install(
-        plan.id, True, lambda *_: None,
-    )
+    installed = manager.install(plan.id, True, lambda *_: None)
+    cached = manager.install(plan.id, True, lambda *_: None)
 
     assert installed.path.read_bytes() == model
     assert installed.cached is False
+    assert cached.path == installed.path
+    assert cached.cached is True
+    assert downloader.calls == [plan.source_url]
     assert not list(tmp_path.rglob("*.part"))
     assert not list(tmp_path.rglob("*.zip"))
+
+
+def test_is_installed_validates_archive_manifest_and_extracted_payload(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = b"archive model"
+    archive = _zip_bytes({"det_2.5g.onnx": model})
+    plan = _plan_for(archive, archive_member="det_2.5g.onnx")
+    _install_test_plan(monkeypatch, plan)
+    manager = ModelManager(tmp_path, downloader=FakeDownloader(archive))
+
+    installed = manager.install(plan.id, True, lambda *_: None)
+    assert manager.is_installed(plan.id) is True
+
+    installed.path.write_bytes(b"tampered payload")
+    assert manager.is_installed(plan.id) is False
+
+
+def test_archive_cache_requires_matching_identity_manifest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = b"archive model"
+    archive = _zip_bytes({"det_2.5g.onnx": model})
+    plan = _plan_for(archive, archive_member="det_2.5g.onnx")
+    _install_test_plan(monkeypatch, plan)
+    downloader = FakeDownloader(archive)
+    manager = ModelManager(tmp_path, downloader=downloader)
+
+    installed = manager.install(plan.id, True, lambda *_: None)
+    manifest = installed.path.with_name(f"{installed.path.name}.autoclip.json")
+
+    assert manifest.is_file()
+    assert json.loads(manifest.read_text(encoding="utf-8")) == {
+        "archive_bytes": len(archive),
+        "archive_sha256": hashlib.sha256(archive).hexdigest(),
+        "destination_relative_path": "models/test.onnx",
+        "extracted_bytes": len(model),
+        "extracted_sha256": hashlib.sha256(model).hexdigest(),
+        "plan_id": "test_model",
+        "source_url": "https://models.example.invalid/test-model",
+    }
+
+    manifest.write_text("{}", encoding="utf-8")
+    reinstalled = manager.install(plan.id, True, lambda *_: None)
+
+    assert reinstalled.cached is False
+    assert downloader.calls == [plan.source_url, plan.source_url]
+
+
+def test_archive_cache_redownloads_if_extracted_payload_is_tampered(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = b"archive model"
+    archive = _zip_bytes({"det_2.5g.onnx": model})
+    plan = _plan_for(archive, archive_member="det_2.5g.onnx")
+    _install_test_plan(monkeypatch, plan)
+    downloader = FakeDownloader(archive)
+    manager = ModelManager(tmp_path, downloader=downloader)
+
+    installed = manager.install(plan.id, True, lambda *_: None)
+    installed.path.write_bytes(b"tampered payload")
+
+    reinstalled = manager.install(plan.id, True, lambda *_: None)
+
+    assert reinstalled.cached is False
+    assert reinstalled.path.read_bytes() == model
+    assert downloader.calls == [plan.source_url, plan.source_url]
 
 
 def test_overlarge_stream_is_deleted_before_install(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

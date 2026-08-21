@@ -24,14 +24,20 @@ const client = {
   exportClip: async () => ({ job_id: "job" }),
   getJob: async () => ({ id: "job", project_id: project.id, kind: "preview", stage: "completed", progress: 1, message: "Done", error: null }),
   watchJob: () => () => undefined,
+  getAccelerationStatus: async () => ({ platform: "Windows", engines: { mediapipe_cpu: { state: "ready", provider: "CPUDelegate" } }, encoders: { libx264: { state: "ready" } } }),
+  listAccelerationPlans: async () => [],
+  recheckAcceleration: async () => ({ platform: "Windows", engines: { mediapipe_cpu: { state: "ready", provider: "CPUDelegate" } }, encoders: { libx264: { state: "ready" } } }),
+  installAcceleration: async () => ({ job_id: "install" }),
+  setProjectAcceleration: async (projectId: string) => ({ project_id: projectId, tracker_engine: "auto", encoder_mode: "auto" }),
 } as unknown as StudioClient;
 
 test("defaults to Indonesian and reveals face selection before approval", async () => {
   const user = userEvent.setup();
+  window.history.replaceState({}, "", "/projects/project-1");
   render(<App client={client} />);
 
   expect(await screen.findByText("PERPUSTAKAAN PROYEK")).toBeInTheDocument();
-  expect(screen.getByText("Pilih subjek")).toBeInTheDocument();
+  expect(await screen.findByRole("button", { name: "Pilih subjek" })).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Setujui pratinjau" })).toBeDisabled();
 
   await user.click(screen.getByRole("button", { name: "EN" }));

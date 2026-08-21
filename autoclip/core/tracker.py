@@ -12,13 +12,19 @@ Pipeline:
 
 from __future__ import annotations
 
+import sys
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
+from autoclip.web.acceleration import TrackerUnavailable
+
+
 if TYPE_CHECKING:
     import numpy as np
+    from autoclip.utils.ffmpeg import VideoEncoding
+    from autoclip.web.acceleration import ResolvedAcceleration
 
 
 # ─── Data classes ─────────────────────────────────────────────────────────────
@@ -165,6 +171,7 @@ def build_crop_trajectory(
     ema_alpha: float = 0.04,
     use_mediapipe: bool = True,
     deadzone_fraction: float = 0.04,
+    resolved_acceleration: ResolvedAcceleration | None = None,
 ) -> CropTrajectory:
     """
     Analyze a video segment and compute a smoothed face-following crop trajectory.
@@ -231,6 +238,25 @@ def build_crop_trajectory(
     ema_target_cx: float = src_width / 2.0
     ema_target_cy: float = src_height / 2.0
 
+    detector = None
+    active_detector = None
+    last_timestamp_ms = -1
+    if resolved_acceleration is not None:
+        from autoclip.web.detectors import DetectorFactory
+
+        try:
+            detector = DetectorFactory().create(resolved_acceleration)
+            active_detector = detector.__enter__()
+        except Exception as error:
+            if detector is not None:
+                detector.__exit__(*sys.exc_info())
+            cap.release()
+            engine = resolved_acceleration.tracker_engine
+            raise TrackerUnavailable(
+                f"tracker_error: engine={engine} state=failed reason={error}; "
+                "repair=run 'autoclip web' and recheck acceleration",
+            ) from error
+
     for frame_idx in range(total_frames):
         ret, frame = cap.read()
         if not ret:
@@ -238,7 +264,33 @@ def build_crop_trajectory(
 
         # Run face detection only on sampled frames
         if frame_idx % sample_every_n_frames == 0:
-            faces = detect_faces(frame, use_mediapipe=use_mediapipe)
+            if active_detector is None:
+                faces = detect_faces(frame, use_mediapipe=use_mediapipe)
+            else:
+                timestamp_ms = max(
+                    last_timestamp_ms + 1,
+                    int((start_time + frame_idx / fps) * 1000),
+                )
+                try:
+                    observations = active_detector.detect(frame, timestamp_ms)
+                except Exception as error:
+                    if detector is not None:
+                        detector.__exit__(*sys.exc_info())
+                    cap.release()
+                    engine = resolved_acceleration.tracker_engine
+                    raise TrackerUnavailable(
+                        f"tracker_error: engine={engine} state=failed reason={error}; "
+                        "repair=run 'autoclip web' and recheck acceleration",
+                    ) from error
+                faces = [
+                    FacePosition(
+                        cx=observation.cx,
+                        cy=observation.cy,
+                        confidence=observation.confidence,
+                    )
+                    for observation in observations
+                ]
+                last_timestamp_ms = timestamp_ms
             face = dominant_face(faces)
             if face:
                 new_cx = face.cx * src_width
@@ -274,6 +326,8 @@ def build_crop_trajectory(
 
         centers.append((clamped_cx, clamped_cy))
 
+    if detector is not None:
+        detector.__exit__(None, None, None)
     cap.release()
 
     return CropTrajectory(
@@ -297,6 +351,7 @@ def apply_face_crop(
     target_height: int = 1920,
     subtitle_path: Optional[Path] = None,
     output_config=None,
+    encoding: VideoEncoding | None = None,
 ) -> Path:
     """
     Apply a face-tracked crop trajectory to a video segment and write output.
@@ -315,13 +370,14 @@ def apply_face_crop(
         target_width: Output width
         target_height: Output height
         subtitle_path: Optional ASS subtitle file to burn in
-        output_config: OutputConfig (for codec/crf settings)
+        output_config: OutputConfig (for audio settings; retained for CLI callers)
+        encoding: Resolved video codec and its exact FFmpeg arguments
 
     Returns:
         Path to final output file
     """
     import cv2
-    from autoclip.utils.ffmpeg import run_ffmpeg
+    from autoclip.utils.ffmpeg import VideoEncoding, run_ffmpeg
 
     cap = cv2.VideoCapture(str(video_path))
     cap.set(cv2.CAP_PROP_POS_MSEC, start_time * 1000)
@@ -387,8 +443,12 @@ def apply_face_crop(
     cap.release()
 
     # ── FFmpeg: mux audio + subtitle ─────────────────────────────────────────
-    crf = getattr(output_config, "crf", 23) if output_config else 23
-    video_codec = getattr(output_config, "video_codec", "libx264") if output_config else "libx264"
+    if encoding is None:
+        encoding = VideoEncoding(
+            mode="libx264",
+            codec="libx264",
+            arguments=["-c:v", "libx264", "-crf", "23", "-preset", "medium"],
+        )
     audio_codec = getattr(output_config, "audio_codec", "aac") if output_config else "aac"
     audio_bitrate = getattr(output_config, "audio_bitrate", "128k") if output_config else "128k"
 
@@ -405,10 +465,7 @@ def apply_face_crop(
         sub_str = str(subtitle_path).replace("\\", "/").replace(":", "\\:")
         ffmpeg_args += ["-vf", f"ass='{sub_str}'"]
 
-    ffmpeg_args += [
-        "-c:v", video_codec,
-        "-crf", str(crf),
-        "-preset", "fast",
+    ffmpeg_args += encoding.arguments + [
         "-c:a", audio_codec,
         "-b:a", audio_bitrate,
         "-movflags", "+faststart",
@@ -440,6 +497,8 @@ def smart_crop_clip(
     sample_every_n_frames: int = 15,
     use_mediapipe: bool = True,
     deadzone_fraction: float = 0.04,
+    encoding: VideoEncoding | None = None,
+    resolved_acceleration: ResolvedAcceleration | None = None,
 ) -> Path:
     """
     Full face-tracking smart crop pipeline for a single clip.
@@ -461,21 +520,25 @@ def smart_crop_clip(
         sample_every_n_frames: Face detection interval (higher=smoother, less accurate)
         use_mediapipe: Prefer MediaPipe over OpenCV Haar
         deadzone_fraction: Min face movement (fraction of frame) to trigger crop update
+        encoding: Resolved video codec and its exact FFmpeg arguments
 
     Returns:
         Path to output file
     """
-    trajectory = build_crop_trajectory(
-        video_path=video_path,
-        start_time=start_time,
-        duration=duration,
-        target_width=target_width,
-        target_height=target_height,
-        sample_every_n_frames=sample_every_n_frames,
-        ema_alpha=ema_alpha,
-        use_mediapipe=use_mediapipe,
-        deadzone_fraction=deadzone_fraction,
-    )
+    trajectory_arguments: dict[str, object] = {
+        "video_path": video_path,
+        "start_time": start_time,
+        "duration": duration,
+        "target_width": target_width,
+        "target_height": target_height,
+        "sample_every_n_frames": sample_every_n_frames,
+        "ema_alpha": ema_alpha,
+        "use_mediapipe": use_mediapipe,
+        "deadzone_fraction": deadzone_fraction,
+    }
+    if resolved_acceleration is not None:
+        trajectory_arguments["resolved_acceleration"] = resolved_acceleration
+    trajectory = build_crop_trajectory(**trajectory_arguments)
 
     return apply_face_crop(
         video_path=video_path,
@@ -487,4 +550,5 @@ def smart_crop_clip(
         target_height=target_height,
         subtitle_path=subtitle_path,
         output_config=output_config,
+        encoding=encoding,
     )

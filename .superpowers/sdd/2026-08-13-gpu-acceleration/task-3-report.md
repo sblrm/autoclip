@@ -112,3 +112,107 @@ Required pending edit:
 3. Re-run required final verification until all 16 tests pass.
 
 Status remains **BLOCKED**. Do not treat partial green results as completion.
+
+---
+
+## Blocker resolved and final verification (editor recovery)
+
+`autoclip/web/tracking.py` now accepts optional keyword-only `delegate`,
+`engine`, `provider`, and `model_id` fields. Its positional defaults remain
+`model_path=None` and `min_confidence=0.5`, preserving legacy construction.
+`MediaPipeTasksDetector.__enter__` passes the selected delegate to:
+
+```python
+mp.tasks.BaseOptions(model_asset_path=str(self.model_path), delegate=self.delegate)
+```
+
+The delegate test fixture assertion was corrected to read its stored kwargs;
+the fake intentionally stores a dict and did not expose `.running_mode`.
+
+Final required command:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests/test_detectors.py tests/test_acceleration_manager.py tests/test_web_tracking.py -q
+```
+
+Result: exit 0, `16 passed in 0.15s`.
+
+Final self-review:
+
+- Existing callers retain the old two positional parameters and CPU metadata defaults.
+- GPU delegate is explicit and is passed to MediaPipe `BaseOptions`; `RunningMode.VIDEO` and `detect_for_video` remain unchanged.
+- Detector metadata now satisfies the shared `VideoFaceDetector` contract without changing tracking/render integration.
+- Exact Task 3 suite is green. No new scope or Git action was introduced.
+
+Status: **DONE**.
+
+---
+
+## Review fix round 1/5
+
+### Findings addressed
+
+- Added public `ModelManager.is_installed(plan_id) -> bool`. It delegates to
+  Task 2's existing direct-file checksum validator and archive manifest plus
+  extracted-payload validator. `AccelerationManager` now delegates cache
+  readiness to this method instead of comparing every destination to the
+  download archive size/SHA.
+- `ModelManager` accepts an optional internal model-plan mapping so
+  `AccelerationManager` uses one validator for production catalog plans and
+  injected test plans.
+- `InsightFaceOnnxDetector` now uses RGB float32 `(pixel - 127.5) / 128.0`.
+  YuNet retains RGB `/ 255.0`.
+- `InsightFaceDecoder` accepts only valid three-stride anchor layouts (six
+  score/bbox tensors, optionally three landmark tensors). It no longer
+  interprets malformed InsightFace outputs as a YuNet empty-face result.
+
+### TDD evidence
+
+RED command:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests/test_model_manager.py tests/test_detectors.py tests/test_acceleration_manager.py -q
+```
+
+Result: exit 1, `5 failed, 24 passed`.
+
+- direct/archive `is_installed` tests failed because public method was absent;
+- archive SCRFD cache status was `missing` instead of `ready`;
+- SCRFD input used YuNet `/255` values;
+- malformed singleton output returned no faces instead of raising.
+
+The first GREEN run exposed a test-fixture error: stride 16/32 tensors were
+zero-length, which cannot represent valid detector outputs. Fixture was
+corrected to valid zero-score tensors with each stride's full anchor count.
+
+Focused GREEN command:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests/test_model_manager.py tests/test_detectors.py tests/test_acceleration_manager.py -q
+```
+
+Result: exit 0, `29 passed in 0.29s`.
+
+Final verification command:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests/test_detectors.py tests/test_acceleration_manager.py tests/test_web_tracking.py tests/test_model_manager.py -q
+```
+
+Result: exit 0, `32 passed in 0.29s`.
+
+### Added coverage and self-review
+
+- Direct YuNet cache: `is_installed` changes from true to false after a
+  same-location payload tamper.
+- Archive model: `is_installed` changes from true to false after extracted
+  ONNX tamper; cached archive SCRFD produces `ready` status through
+  `AccelerationManager`.
+- Known SCRFD fixture proves BGR-to-RGB centered normalization and anchored
+  stride-8 face center `(0.5, 0.5)` at confidence `0.95`.
+- Malformed one-output ONNX result raises instead of reporting an empty face
+  list, so live status cannot falsely infer a valid detector path.
+- CUDA provider selection, MediaPipe legacy defaults, extraction-only scope,
+  and no-embedding boundary remain unchanged.
+
+Review fix round 1/5 status: **DONE**.

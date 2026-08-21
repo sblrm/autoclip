@@ -21,6 +21,7 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 packages = [{include = "autoclip"}]
+include = [{path = "autoclip/web/static/**/*", format = ["sdist", "wheel"]}]
 
 [tool.poetry.dependencies]
 python = "^3.10"
@@ -83,6 +84,7 @@ ignore_missing_imports = true
 testpaths = ["tests"]
 addopts = "-v --tb=short"
 filterwarnings = ["ignore::DeprecationWarning"]
+markers = ["gpu: opt-in tests requiring real local GPU hardware"]
 
 [build-system]
 requires = ["poetry-core"]

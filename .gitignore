@@ -52,3 +52,5 @@ logs/
 # Temp files
 tmp/
 temp/
+# Added by code-review-graph
+.code-review-graph/

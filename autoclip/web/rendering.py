@@ -3,25 +3,43 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from autoclip.core.tracker import CropTrajectory, apply_face_crop
+from autoclip.utils.ffmpeg import (
+    EncoderCapability,
+    VideoEncoding,
+    list_video_encoders,
+    resolve_video_encoding,
+    smoke_test_encoder,
+)
+from autoclip.web.acceleration import (
+    AccelerationSelection,
+    EncoderMode,
+    ResolvedAcceleration,
+    TrackerUnavailable,
+)
+from autoclip.web.acceleration_manager import AccelerationManager
+from autoclip.web.detectors import DetectorFactory as ResolvedDetectorFactory
 from autoclip.web.full_store import FullStudioStore
-from autoclip.web.runtime_store import Artifact, FaceTrackRecord
+from autoclip.web.runtime_store import Artifact, ClipTrackingResolution, FaceTrackRecord
 from autoclip.web.tracking import (
     FaceObservation,
     FaceTrack,
-    MediaPipeTasksDetector,
     build_crop_targets,
     build_face_tracks,
 )
 
 ProgressReporter = Callable[[str, float, str], None]
-DetectorFactory = Callable[[], AbstractContextManager[Any]]
 Cropper = Callable[..., Path]
+EncoderCapabilities = Callable[[], Mapping[str, object]]
+
+
+class AccelerationManagerLike(Protocol):
+    def status(self) -> Any: ...
 
 
 def build_saved_trajectory(
@@ -59,14 +77,25 @@ class TrackingService:
         self,
         store: FullStudioStore,
         *,
-        detector_factory: DetectorFactory = MediaPipeTasksDetector,
+        acceleration_manager: AccelerationManagerLike | None = None,
+        detector_factory: object | None = None,
+        encoder_capabilities: EncoderCapabilities | None = None,
         cropper: Cropper = apply_face_crop,
         sample_every_n_frames: int = 8,
         hold_samples: int = 1,
         ease_samples: int = 3,
     ) -> None:
         self.store = store
-        self._detector_factory = detector_factory
+        self._legacy_detector_factory = (
+            detector_factory
+            if detector_factory is not None and not callable(getattr(detector_factory, "create", None))
+            else None
+        )
+        self._detector_factory = detector_factory or ResolvedDetectorFactory()
+        self._acceleration_manager = acceleration_manager or AccelerationManager(
+            detector_factory=self._detector_factory,
+        )
+        self._encoder_capabilities = encoder_capabilities or _probe_encoder_capabilities
         self._cropper = cropper
         self.sample_every_n_frames = sample_every_n_frames
         self.hold_samples = hold_samples
@@ -77,6 +106,7 @@ class TrackingService:
         import cv2
 
         clip = self.store.get_clip(clip_id)
+        resolution, detector = self._create_detector(clip.project_id)
         source_path = self._source_path(clip.project_id)
         capture = cv2.VideoCapture(str(source_path))
         if not capture.isOpened():
@@ -88,7 +118,7 @@ class TrackingService:
         last_timestamp = -1
         report("detecting_faces", 0.12, "Detecting stable subject candidates")
         try:
-            with self._detector_factory() as detector:
+            with detector as active_detector:
                 for frame_index in range(total_frames):
                     ok, frame = capture.read()
                     if not ok:
@@ -96,7 +126,7 @@ class TrackingService:
                     if frame_index % self.sample_every_n_frames != 0:
                         continue
                     timestamp_ms = max(last_timestamp + 1, int((clip.start_time + frame_index / fps) * 1000))
-                    sampled.append(detector.detect(frame, timestamp_ms))
+                    sampled.append(active_detector.detect(frame, timestamp_ms))
                     last_timestamp = timestamp_ms
                     report(
                         "detecting_faces",
@@ -108,6 +138,7 @@ class TrackingService:
 
         tracks = build_face_tracks(sampled)
         self.store.clear_tracking_data(clip_id)
+        self.store.save_clip_tracking_resolution(clip_id, resolution, None)
         records: list[FaceTrackRecord] = []
         for index, track in enumerate(tracks, start=1):
             record = self.store.save_face_track(
@@ -127,19 +158,26 @@ class TrackingService:
         return records
 
     def render_preview(self, clip_id: str, report: ProgressReporter) -> Artifact | None:
-        """Detect candidates first; render only after the editor locks one subject."""
+        """Render only after explicit detection saved a run and the editor locked a subject."""
         clip = self.store.get_clip(clip_id)
-        if not self.store.list_face_tracks(clip_id):
-            self.detect_tracks(clip_id, report)
-            return None
+        resolution = self._require_resolution(clip_id)
         if not clip.selected_face_track_id:
             self.store.update_clip(clip_id, tracking_status="needs_subject")
             report("needs_subject", 0.95, "Select a detected face before rendering preview")
             return None
+        encoding = self._resolve_encoding(clip.project_id)
         report("building_trajectory", 0.15, "Building saved crop trajectory for locked subject")
-        trajectory_path = self._write_trajectory(clip_id)
+        trajectory_artifact = self._write_trajectory(clip_id, resolution, encoding.mode)
         report("rendering_preview", 0.45, "Rendering 9:16 tracking preview")
-        artifact = self._render(clip_id, trajectory_path, kind="tracking_preview", width=360, height=640)
+        artifact = self._render(
+            clip_id,
+            trajectory_artifact,
+            resolution,
+            encoding,
+            kind="tracking_preview",
+            width=360,
+            height=640,
+        )
         self.store.update_clip(clip_id, tracking_status="preview_ready")
         self.store.mark_preview_ready(clip_id)
         report("preview_ready", 0.95, "Preview ready for approval")
@@ -150,16 +188,33 @@ class TrackingService:
         clip = self.store.get_clip(clip_id)
         if clip.status != "approved":
             raise ValueError("Approve the tracking preview before exporting")
-        trajectory_path = self._find_saved_trajectory(clip_id, clip.selected_face_track_id)
+        resolution = self._require_resolution(clip_id)
+        encoding = self._resolve_encoding(clip.project_id)
+        trajectory_artifact = self._find_saved_trajectory(clip_id, clip.selected_face_track_id)
+        if resolution.trajectory_artifact_id != trajectory_artifact.id:
+            raise TrackerUnavailable("tracker_error: saved resolution does not reference selected trajectory")
         report("exporting", 0.3, "Rendering approved 1080×1920 export")
-        artifact = self._render(clip_id, trajectory_path, kind="export", width=1080, height=1920)
+        artifact = self._render(
+            clip_id,
+            trajectory_artifact,
+            resolution,
+            encoding,
+            kind="export",
+            width=1080,
+            height=1920,
+        )
         self.store.update_clip(clip_id, tracking_status="exported")
         self.store.set_clip_status(clip_id, "exported")
         self.store.set_project_status(clip.project_id, "completed")
         report("completed", 0.95, "Approved vertical MP4 export is ready")
         return artifact
 
-    def _write_trajectory(self, clip_id: str) -> Path:
+    def _write_trajectory(
+        self,
+        clip_id: str,
+        resolution: ClipTrackingResolution,
+        encoder_mode: EncoderMode,
+    ) -> Artifact:
         import cv2
 
         clip = self.store.get_clip(clip_id)
@@ -203,14 +258,42 @@ class TrackingService:
             "src_height": trajectory.src_height,
             "centers": trajectory.centers,
             "gaps": gaps,
+            "tracker_engine": resolution.tracker_engine,
+            "provider": resolution.provider,
+            "model_id": resolution.model_id,
         }
         destination.write_text(json.dumps(payload), encoding="utf-8")
-        self.store.save_artifact(clip.project_id, "tracking_trajectory", destination, clip_id=clip.id)
-        return destination
+        artifact = self.store.save_artifact(
+            clip.project_id,
+            "tracking_trajectory",
+            destination,
+            clip_id=clip.id,
+        )
+        self.store.save_clip_tracking_resolution(
+            clip.id,
+            ResolvedAcceleration(
+                tracker_engine=resolution.tracker_engine,
+                encoder_mode=encoder_mode,
+                provider=resolution.provider,
+                model_id=resolution.model_id,
+            ),
+            artifact.id,
+        )
+        return artifact
 
-    def _render(self, clip_id: str, trajectory_path: Path, *, kind: str, width: int, height: int) -> Artifact:
+    def _render(
+        self,
+        clip_id: str,
+        trajectory_artifact: Artifact,
+        resolution: ClipTrackingResolution,
+        encoding: VideoEncoding,
+        *,
+        kind: str,
+        width: int,
+        height: int,
+    ) -> Artifact:
         clip = self.store.get_clip(clip_id)
-        payload = json.loads(trajectory_path.read_text(encoding="utf-8"))
+        payload = json.loads(Path(trajectory_artifact.path).read_text(encoding="utf-8"))
         trajectory = CropTrajectory(
             centers=[tuple(center) for center in payload["centers"]],
             fps=float(payload["fps"]),
@@ -228,10 +311,24 @@ class TrackingService:
             duration=float(payload["duration"]),
             target_width=width,
             target_height=height,
+            encoding=encoding,
         )
-        return self.store.save_artifact(clip.project_id, kind, output_path, clip_id=clip.id)
+        return self.store.save_artifact(
+            clip.project_id,
+            kind,
+            output_path,
+            clip_id=clip.id,
+            metadata={
+                "encoder_mode": encoding.mode,
+                "encoder": encoding.codec,
+                "tracker_engine": resolution.tracker_engine,
+                "provider": resolution.provider,
+                "model_id": resolution.model_id,
+                "trajectory_artifact_id": trajectory_artifact.id,
+            },
+        )
 
-    def _find_saved_trajectory(self, clip_id: str, selected_track_id: str | None) -> Path:
+    def _find_saved_trajectory(self, clip_id: str, selected_track_id: str | None) -> Artifact:
         clip = self.store.get_clip(clip_id)
         for artifact in reversed(self.store.list_artifacts(clip.project_id)):
             if artifact.clip_id != clip_id or artifact.kind != "tracking_trajectory":
@@ -241,8 +338,42 @@ class TrackingService:
                 continue
             payload = json.loads(path.read_text(encoding="utf-8"))
             if payload.get("selected_face_track_id") == selected_track_id:
-                return path
+                return artifact
         raise ValueError("No saved preview trajectory exists for the selected face")
+
+    def _create_detector(
+        self,
+        project_id: str,
+    ) -> tuple[ResolvedAcceleration, AbstractContextManager[Any]]:
+        if self._legacy_detector_factory is not None:
+            detector = self._legacy_detector_factory()
+            resolution = ResolvedAcceleration(
+                tracker_engine=getattr(detector, "engine", "mediapipe_cpu"),
+                encoder_mode="libx264",
+                provider=getattr(detector, "provider", "CPUDelegate"),
+                model_id=getattr(detector, "model_id", None),
+            )
+            return resolution, detector
+
+        selection = self.store.get_project_acceleration(project_id)
+        resolution = self._acceleration_manager.status().resolve(
+            AccelerationSelection(
+                tracker_engine=selection.tracker_engine,
+                encoder_mode=selection.encoder_mode,
+            ),
+        )
+        create = getattr(self._detector_factory, "create")
+        return resolution, create(resolution)
+
+    def _require_resolution(self, clip_id: str) -> ClipTrackingResolution:
+        resolution = self.store.get_clip_tracking_resolution(clip_id)
+        if resolution is None:
+            raise TrackerUnavailable("tracker_error: no saved tracking resolution")
+        return resolution
+
+    def _resolve_encoding(self, project_id: str) -> VideoEncoding:
+        selection = self.store.get_project_acceleration(project_id)
+        return resolve_video_encoding(selection.encoder_mode, self._encoder_capabilities())
 
     def _source_path(self, project_id: str) -> Path:
         project = self.store.get_project(project_id)
@@ -303,3 +434,15 @@ def _clamp_crop_center(observation: FaceObservation, width: int, height: int) ->
     center_x = max(half_width, min(width - half_width, observation.cx * width))
     center_y = max(half_height, min(height - half_height, observation.cy * height))
     return center_x, center_y
+
+
+def _probe_encoder_capabilities() -> Mapping[str, EncoderCapability]:
+    listed = list_video_encoders()
+    capabilities: dict[str, EncoderCapability] = {}
+    for mode in ("h264_nvenc", "hevc_nvenc"):
+        capabilities[mode] = (
+            smoke_test_encoder(mode)
+            if mode in listed
+            else EncoderCapability.missing(f"{mode} is not listed by FFmpeg")
+        )
+    return capabilities

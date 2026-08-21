@@ -5,6 +5,8 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
+from autoclip.web.acceleration import ResolvedAcceleration
+
 
 def test_studio_api_locks_a_project_face_track_and_runs_preview_job(tmp_path: Path) -> None:
     from autoclip.web.full_store import FullStudioStore
@@ -48,6 +50,16 @@ def test_studio_api_locks_a_project_face_track_and_runs_preview_job(tmp_path: Pa
         label="Subject 1",
         confidence=0.9,
         samples=[{"cx": 0.4, "cy": 0.5, "confidence": 0.9}],
+    )
+    app.state.store.save_clip_tracking_resolution(
+        clip.id,
+        ResolvedAcceleration(
+            tracker_engine="mediapipe_cpu",
+            encoder_mode="libx264",
+            provider="CPUDelegate",
+            model_id="face_detector",
+        ),
+        None,
     )
 
     selected = client.patch(f"/api/clips/{clip.id}", json={"selected_face_track_id": track.id})

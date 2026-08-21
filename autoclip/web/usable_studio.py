@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import uuid
 from pathlib import Path
 from typing import Any
 
@@ -11,9 +10,9 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from autoclip.web.onboarding import OnboardingService
 from autoclip.web.setup_manager import SetupManager
-from autoclip.web.studio_server import JobResponse, create_studio_server
-from autoclip.web.studio_store import Job
+from autoclip.web.studio_server import JobResponse, _create_setup_job, create_studio_server
 
 
 class SetupInstallRequest(BaseModel):
@@ -25,15 +24,32 @@ def create_usable_studio(
     *,
     dist: Path | None = None,
     setup_manager: SetupManager | Any | None = None,
+    pipeline_factory: Any | None = None,
+    tracking_factory: Any | None = None,
 ):
     """Extend the editor API with a guided local setup surface."""
-    app = create_studio_server(library_root)
-    manager = setup_manager or SetupManager()
+    factories = {
+        key: value
+        for key, value in {
+            "pipeline_factory": pipeline_factory,
+            "tracking_factory": tracking_factory,
+        }.items()
+        if value is not None
+    }
+    app = create_studio_server(library_root, **factories)
+    manager = setup_manager or app.state.setup_manager
     app.state.setup_manager = manager
-    static_root = dist or Path(__file__).parents[2] / "web" / "dist"
-    entry = static_root / "ux.html"
+    app.state.onboarding = OnboardingService(
+        store=app.state.store,
+        setup_manager=manager,
+        acceleration_manager=app.state.acceleration_manager,
+    )
+    static_root = dist or Path(__file__).resolve().parent / "static"
+    entry = static_root / "index.html"
     if not entry.is_file():
-        raise FileNotFoundError("Setup studio is not built. Run autoclip-setup-studio.bat first.")
+        raise FileNotFoundError(
+            "Studio assets are missing; build frontend assets with `npm.cmd run build` from web/."
+        )
 
     @app.get("/api/setup/status")
     def setup_status() -> dict[str, object]:
@@ -60,31 +76,14 @@ def create_usable_studio(
     assets = static_root / "assets"
     if assets.is_dir():
         app.mount("/assets", StaticFiles(directory=assets), name="setup-assets")
+
+    @app.get("/{path:path}", include_in_schema=False, response_class=HTMLResponse)
+    def studio_route(path: str) -> HTMLResponse:
+        if path.startswith("api/"):
+            raise HTTPException(status_code=404, detail="Not found")
+        return HTMLResponse(entry.read_text(encoding="utf-8"))
+
     return app
-
-
-def _create_setup_job(store: Any, component: str) -> Job:
-    """Use existing durable serial queue without creating a fake media project."""
-    job = Job(
-        id=uuid.uuid4().hex,
-        project_id="__setup__",
-        kind=f"setup:{component}",
-        stage="queued",
-        progress=0.0,
-        message=f"Queued setup for {component}",
-        error=None,
-    )
-    with store._connect() as connection:
-        connection.execute(
-            """
-            INSERT INTO jobs (id, project_id, kind, stage, progress, message, error)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (job.id, job.project_id, job.kind, job.stage, job.progress, job.message, job.error),
-        )
-    return job
-
-
 if __name__ == "__main__":
     import uvicorn
 

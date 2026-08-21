@@ -46,7 +46,28 @@ class FullStudioStore(RuntimeStore):
                 "DELETE FROM artifacts WHERE clip_id = ? AND kind IN ('tracking_trajectory', 'tracking_preview')",
                 (clip_id,),
             )
-        self.update_clip(clip_id, selected_face_track_id=None, tracking_status="detecting")
+            connection.execute("DELETE FROM clip_tracking_resolutions WHERE clip_id = ?", (clip_id,))
+            connection.execute(
+                """
+                UPDATE clips
+                SET status = 'draft', selected_face_track_id = NULL, tracking_status = 'detecting'
+                WHERE id = ?
+                """,
+                (clip_id,),
+            )
+
+    def clear_tracking_preview(self, clip_id: str) -> None:
+        """Invalidate an encoded preview without discarding detection or its subject lock."""
+        self.get_clip(clip_id)
+        with self._connect() as connection:
+            connection.execute(
+                "DELETE FROM artifacts WHERE clip_id = ? AND kind = 'tracking_preview'",
+                (clip_id,),
+            )
+            connection.execute(
+                "UPDATE clips SET status = 'draft', tracking_status = 'needs_preview' WHERE id = ?",
+                (clip_id,),
+            )
 
     def save_tracking_gap(self, clip_id: str, start_sample: int, end_sample: int) -> TrackingGap:
         self.get_clip(clip_id)

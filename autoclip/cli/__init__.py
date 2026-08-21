@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import importlib.util
-import subprocess
 import sys
 from pathlib import Path
 
@@ -33,13 +32,9 @@ app = _load_legacy_app()
 
 @app.command("web")
 def web() -> None:
-    """Open guided local Setup Center and video studio."""
-    root = Path(__file__).resolve().parents[2]
-    launcher = root / "autoclip-setup-studio.bat"
-    if sys.platform != "win32":
-        raise typer.BadParameter("The bundled web launcher currently supports Windows only.")
-    if not launcher.is_file():
-        raise typer.BadParameter(f"Setup Center launcher is missing: {launcher}")
-    result = subprocess.run(["cmd", "/c", str(launcher)], cwd=root, check=False)
-    if result.returncode:
-        raise typer.Exit(result.returncode)
+    """Open packaged local Studio in the default browser."""
+    from autoclip.web.launch import run_web
+
+    result = run_web()
+    if result:
+        raise typer.Exit(result)

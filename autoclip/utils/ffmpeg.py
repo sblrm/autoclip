@@ -6,9 +6,138 @@ import json
 import shutil
 import subprocess
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal, Protocol
+
+from autoclip.web.acceleration import EncoderMode, EncoderUnavailable
+
+
+class CommandResult(Protocol):
+    returncode: int
+    output: str
+
+
+CommandRunner = Callable[[Sequence[str]], CommandResult]
+
+
+@dataclass(frozen=True)
+class EncoderCapability:
+    """Result of a real encoder invocation, not only FFmpeg enumeration."""
+
+    state: Literal["ready", "failed", "missing"]
+    reason: str | None = None
+
+    @classmethod
+    def ready(cls) -> "EncoderCapability":
+        return cls("ready")
+
+    @classmethod
+    def failed(cls, reason: str) -> "EncoderCapability":
+        return cls("failed", reason)
+
+    @classmethod
+    def missing(cls, reason: str | None = None) -> "EncoderCapability":
+        return cls("missing", reason)
+
+
+@dataclass(frozen=True)
+class VideoEncoding:
+    mode: EncoderMode
+    codec: str
+    arguments: list[str]
+
+
+@dataclass(frozen=True)
+class _CommandResult:
+    returncode: int
+    output: str
+
+
+def _run_command(command: Sequence[str]) -> _CommandResult:
+    try:
+        result = subprocess.run(
+            list(command),
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except (FileNotFoundError, OSError, subprocess.SubprocessError) as error:
+        return _CommandResult(127, str(error))
+    return _CommandResult(
+        result.returncode,
+        (result.stdout + "\n" + result.stderr).strip(),
+    )
+
+
+def list_video_encoders(runner: CommandRunner = _run_command) -> set[str]:
+    """Return only video encoders reported by ``ffmpeg -encoders``."""
+    result = runner(["ffmpeg", "-hide_banner", "-encoders"])
+    if result.returncode != 0:
+        return set()
+    encoders: set[str] = set()
+    for line in result.output.splitlines():
+        columns = line.lstrip().split(maxsplit=2)
+        if len(columns) < 2:
+            continue
+        flags, name = columns[:2]
+        if len(flags) == 6 and flags.startswith("V") and name != "=":
+            encoders.add(name)
+    return encoders
+
+
+def smoke_test_encoder(
+    mode: Literal["h264_nvenc", "hevc_nvenc"],
+    runner: CommandRunner = _run_command,
+) -> EncoderCapability:
+    """Encode one generated frame so listed-but-unusable NVENC stays unavailable."""
+    result = runner([
+        "ffmpeg", "-hide_banner", "-y", "-f", "lavfi", "-i",
+        "color=c=black:s=640x360:d=0.1", "-frames:v", "1", "-c:v", mode,
+        "-f", "null", "-",
+    ])
+    if result.returncode == 0:
+        return EncoderCapability.ready()
+    return EncoderCapability.failed(result.output[-1000:])
+
+
+def resolve_video_encoding(
+    requested: EncoderMode,
+    capabilities: Mapping[str, object],
+) -> VideoEncoding:
+    """Resolve exact FFmpeg video arguments without explicit NVENC fallback."""
+    mode: EncoderMode
+    if requested == "auto":
+        mode = "h264_nvenc" if _capability_ready(capabilities.get("h264_nvenc")) else "libx264"
+    elif requested in ("h264_nvenc", "hevc_nvenc"):
+        capability = capabilities.get(requested)
+        if not _capability_ready(capability):
+            state = getattr(capability, "state", "missing")
+            reason = getattr(capability, "reason", None) or "no verified smoke test"
+            raise EncoderUnavailable(
+                f"nvenc_error: encoder={requested} state={state} reason={reason}",
+            )
+        mode = requested
+    elif requested == "libx264":
+        mode = requested
+    else:
+        raise ValueError(f"Unknown video encoder: {requested}")
+
+    arguments = {
+        "libx264": ["-c:v", "libx264", "-crf", "23", "-preset", "medium"],
+        "h264_nvenc": [
+            "-c:v", "h264_nvenc", "-preset", "p5", "-cq", "23", "-b:v", "0",
+        ],
+        "hevc_nvenc": [
+            "-c:v", "hevc_nvenc", "-preset", "p5", "-cq", "25", "-b:v", "0",
+        ],
+    }[mode]
+    return VideoEncoding(mode=mode, codec=mode, arguments=arguments)
+
+
+def _capability_ready(capability: object | None) -> bool:
+    return getattr(capability, "state", None) == "ready"
 
 
 @dataclass

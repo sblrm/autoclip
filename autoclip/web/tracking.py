@@ -121,9 +121,22 @@ def get_tracker_capability(model_path: Path | None = None) -> TrackerCapability:
 class MediaPipeTasksDetector:
     """Keep one supported detector alive for one ordered video pass."""
 
-    def __init__(self, model_path: Path | None = None, min_confidence: float = 0.5) -> None:
+    def __init__(
+        self,
+        model_path: Path | None = None,
+        min_confidence: float = 0.5,
+        *,
+        delegate: Any | None = None,
+        engine: str = "mediapipe_cpu",
+        provider: str = "CPUDelegate",
+        model_id: str | None = None,
+    ) -> None:
         self.model_path = model_path or default_model_path()
         self.min_confidence = min_confidence
+        self.delegate = delegate
+        self.engine = engine
+        self.provider = provider
+        self.model_id = model_id
         capability = get_tracker_capability(self.model_path)
         if not capability.available:
             raise FaceTrackingUnavailable(capability.reason)
@@ -134,7 +147,10 @@ class MediaPipeTasksDetector:
         import mediapipe as mp
 
         options = mp.tasks.vision.FaceDetectorOptions(
-            base_options=mp.tasks.BaseOptions(model_asset_path=str(self.model_path)),
+            base_options=mp.tasks.BaseOptions(
+                model_asset_path=str(self.model_path),
+                delegate=self.delegate,
+            ),
             running_mode=mp.tasks.vision.RunningMode.VIDEO,
             min_detection_confidence=self.min_confidence,
         )

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import platform
 import subprocess
 from collections.abc import Callable, Mapping
@@ -11,6 +10,11 @@ from typing import Protocol, cast
 
 import numpy as np
 
+from autoclip.utils.ffmpeg import (
+    EncoderCapability,
+    list_video_encoders,
+    smoke_test_encoder,
+)
 from autoclip.web.acceleration import (
     AccelerationStatus,
     EncoderProbe,
@@ -21,6 +25,7 @@ from autoclip.web.acceleration import (
 )
 from autoclip.web.detectors import DetectorFactory
 from autoclip.web.model_catalog import MODEL_PLANS, ModelPlan
+from autoclip.web.model_manager import ModelManager
 
 
 class Probe(Protocol):
@@ -94,18 +99,13 @@ class RuntimeProbe:
         onnxruntime.preload_dlls()
 
     def nvenc_available(self, encoder: str) -> bool:
-        try:
-            completed = subprocess.run(
-                ["ffmpeg", "-hide_banner", "-encoders"],
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-        except (FileNotFoundError, subprocess.SubprocessError):
-            return False
-        return encoder in completed.stdout
+        return self.nvenc_smoke(encoder).state == "ready"
 
+    def nvenc_smoke(self, encoder: str) -> EncoderCapability:
+        """Require FFmpeg enumeration plus one real encoded frame."""
+        if encoder not in list_video_encoders():
+            return EncoderCapability.missing(f"{encoder} is not listed by FFmpeg")
+        return smoke_test_encoder(encoder)  # type: ignore[arg-type]
 
 class LiveAccelerationStatus(AccelerationStatus):
     """Acceleration status with convenient named capability lookup."""
@@ -145,6 +145,7 @@ class AccelerationManager:
         self._models_root = (models_root or Path.home() / ".autoclip" / "models").expanduser()
         self._model_plans = model_plans or MODEL_PLANS
         self._model_available_override = model_available
+        self._model_manager = ModelManager(self._models_root, model_plans=self._model_plans)
         self._detector_factory = detector_factory or DetectorFactory(models_root=self._models_root)
 
     def status(self) -> LiveAccelerationStatus:
@@ -284,20 +285,7 @@ class AccelerationManager:
                 return bool(self._model_available_override(model_id))
             except Exception:
                 return False
-        plan = self._model_plans.get(model_id)
-        if plan is None:
-            return False
-        path = self._models_root / Path(*plan.destination_relative_path.split("/"))
-        try:
-            if not path.is_file() or path.stat().st_size != plan.bytes:
-                return False
-            digest = hashlib.sha256()
-            with path.open("rb") as stream:
-                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-                    digest.update(chunk)
-            return digest.hexdigest() == plan.sha256
-        except OSError:
-            return False
+        return self._model_manager.is_installed(model_id)
 
     def _is_ubuntu(self, system: str) -> bool:
         if system.casefold() != "linux":
@@ -345,6 +333,22 @@ class AccelerationManager:
     def _probe_encoder(self, encoder: str, nvidia: tuple[str, str] | None) -> EncoderProbe:
         if nvidia is None:
             return EncoderProbe(state="unsupported", reason="NVIDIA GPU or driver is unavailable")
+        smoke = getattr(self._probe, "nvenc_smoke", None)
+        if callable(smoke):
+            try:
+                capability = smoke(encoder)
+            except Exception as exc:
+                return EncoderProbe(
+                    state="failed",
+                    reason=f"NVENC smoke failed ({type(exc).__name__})",
+                )
+            state = getattr(capability, "state", "failed")
+            reason = getattr(capability, "reason", None)
+            if state == "ready":
+                return EncoderProbe(state="ready")
+            if state == "missing":
+                return EncoderProbe(state="unsupported", reason=reason)
+            return EncoderProbe(state="failed", reason=reason or f"{encoder} smoke failed")
         try:
             available = self._probe.nvenc_available(encoder)
         except Exception as exc:

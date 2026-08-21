@@ -213,6 +213,167 @@ class TestBuildCropTrajectory:
             assert cx <= src_width - half_w
             assert cy <= src_height - half_h
 
+    def test_resolved_engine_uses_one_video_detector_with_monotonic_timestamps(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import sys
+
+        from autoclip.core.tracker import build_crop_trajectory
+        from autoclip.web.acceleration import ResolvedAcceleration
+        from autoclip.web.tracking import FaceObservation
+
+        mock_cv2 = _make_cv2_mock(width=1920, height=1080, fps=30.0, total_frames=30)
+        timestamps: list[int] = []
+        resolutions: list[ResolvedAcceleration] = []
+
+        class FakeDetector:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args: object) -> None:
+                return None
+
+            def detect(self, _frame: object, timestamp_ms: int):
+                timestamps.append(timestamp_ms)
+                return [FaceObservation(0.25, 0.5, 0.9)]
+
+        class FakeFactory:
+            def create(self, resolution: ResolvedAcceleration) -> FakeDetector:
+                resolutions.append(resolution)
+                return FakeDetector()
+
+        resolution = ResolvedAcceleration(
+            tracker_engine="yunet_cuda",
+            encoder_mode="libx264",
+            provider="CUDAExecutionProvider",
+            model_id="yunet_2023mar",
+        )
+        monkeypatch.setattr(
+            "autoclip.core.tracker.detect_faces",
+            lambda *_args, **_kwargs: pytest.fail("legacy detector must not run"),
+        )
+        monkeypatch.setattr(
+            "autoclip.web.detectors.DetectorFactory",
+            lambda: FakeFactory(),
+        )
+
+        with patch.dict(sys.modules, {"cv2": mock_cv2}):
+            trajectory = build_crop_trajectory(
+                video_path=Path("fake.mp4"),
+                start_time=2.0,
+                duration=1.0,
+                sample_every_n_frames=5,
+                resolved_acceleration=resolution,
+            )
+
+        assert resolutions == [resolution]
+        assert timestamps == [2000, 2166, 2333, 2500, 2666, 2833]
+        assert len(trajectory.centers) == 30
+
+    def test_resolved_detector_runtime_failure_stays_structured(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import sys
+
+        from autoclip.core.tracker import build_crop_trajectory
+        from autoclip.web.acceleration import ResolvedAcceleration, TrackerUnavailable
+
+        mock_cv2 = _make_cv2_mock(total_frames=1)
+
+        class FailingDetector:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args: object) -> None:
+                return None
+
+            def detect(self, _frame: object, _timestamp_ms: int):
+                raise RuntimeError("CUDA execution failed")
+
+        class FakeFactory:
+            def create(self, _resolution: ResolvedAcceleration) -> FailingDetector:
+                return FailingDetector()
+
+        resolution = ResolvedAcceleration(
+            tracker_engine="yunet_cuda",
+            encoder_mode="libx264",
+            provider="CUDAExecutionProvider",
+            model_id="yunet_2023mar",
+        )
+        monkeypatch.setattr(
+            "autoclip.web.detectors.DetectorFactory",
+            lambda: FakeFactory(),
+        )
+
+        with patch.dict(sys.modules, {"cv2": mock_cv2}):
+            with pytest.raises(
+                TrackerUnavailable,
+                match=r"tracker_error: engine=yunet_cuda state=failed.*autoclip web",
+            ):
+                build_crop_trajectory(
+                    video_path=Path("fake.mp4"),
+                    start_time=0.0,
+                    duration=1.0,
+                    resolved_acceleration=resolution,
+                )
+
+
+def test_smart_crop_clip_preserves_legacy_positional_optional_arguments(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from autoclip.core.tracker import CropTrajectory, smart_crop_clip
+
+    source = Path("source.mp4")
+    output = Path("output.mp4")
+    subtitle = Path("subtitle.ass")
+    output_config = object()
+    build_arguments: dict[str, object] = {}
+    apply_arguments: dict[str, object] = {}
+
+    def fake_build_crop_trajectory(**kwargs: object) -> CropTrajectory:
+        build_arguments.update(kwargs)
+        return CropTrajectory([], 30.0, 1920, 1080)
+
+    def fake_apply_face_crop(**kwargs: object) -> Path:
+        apply_arguments.update(kwargs)
+        return output
+
+    monkeypatch.setattr("autoclip.core.tracker.build_crop_trajectory", fake_build_crop_trajectory)
+    monkeypatch.setattr("autoclip.core.tracker.apply_face_crop", fake_apply_face_crop)
+
+    result = smart_crop_clip(
+        source,
+        output,
+        1.25,
+        2.5,
+        720,
+        1280,
+        subtitle,
+        output_config,
+        0.2,
+        7,
+        False,
+        0.08,
+    )
+
+    assert result == output
+    assert build_arguments == {
+        "video_path": source,
+        "start_time": 1.25,
+        "duration": 2.5,
+        "target_width": 720,
+        "target_height": 1280,
+        "sample_every_n_frames": 7,
+        "ema_alpha": 0.2,
+        "use_mediapipe": False,
+        "deadzone_fraction": 0.08,
+    }
+    assert apply_arguments["subtitle_path"] == subtitle
+    assert apply_arguments["output_config"] is output_config
+    assert apply_arguments["encoding"] is None
+
 
 # ─── TrackerConfig ────────────────────────────────────────────────────────────
 

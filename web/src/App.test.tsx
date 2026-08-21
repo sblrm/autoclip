@@ -1,9 +1,9 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { App } from "./App";
-import type { StudioClient } from "./api";
+import type { Project, StudioClient } from "./api";
 
-const project = {
+const project: Project = {
   id: "project-1",
   title: "Episode Studio",
   source_kind: "upload",
@@ -12,6 +12,16 @@ const project = {
 };
 
 const client: StudioClient = {
+  getOnboarding: async () => ({
+    preferences: { locale: "id", last_project_id: null, onboarding_complete: false, performance_profile: "auto", updated_at: "" },
+    setup: { components: [], is_ready: true, tutorial_steps: [] },
+    acceleration: { platform: "Windows", engines: {}, encoders: { libx264: { state: "ready" } } },
+    recommended_action: { id: "start_project", title: "Start a project" },
+    tutorial_steps: [],
+  }),
+  updatePreferences: async () => ({} as never),
+  repairRequiredSetup: async () => ({ job_id: "repair" }),
+  applyPerformanceProfile: async () => ({} as never),
   getHealth: async () => ({
     ffmpeg: { available: true },
     opencv: { available: true, version: "4" },
@@ -50,16 +60,49 @@ const client: StudioClient = {
   createPreview: async () => ({ job_id: "job" }),
   approve: async () => ({}) as never,
   exportClip: async () => ({ job_id: "job" }),
+  getJob: async () => ({ id: "job", project_id: project.id, kind: "test", stage: "completed", progress: 1, message: "done", error: null }),
+  watchJob: () => () => undefined,
+  getAccelerationStatus: async () => ({ platform: "Windows", engines: { mediapipe_cpu: { state: "ready", provider: "CPUDelegate" } }, encoders: { libx264: { state: "ready" } } }),
+  listAccelerationPlans: async () => [],
+  recheckAcceleration: async () => ({ platform: "Windows", engines: { mediapipe_cpu: { state: "ready", provider: "CPUDelegate" } }, encoders: { libx264: { state: "ready" } } }),
+  installAcceleration: async () => ({ job_id: "install" }),
+  setProjectAcceleration: async (projectId) => ({ project_id: projectId, tracker_engine: "auto", encoder_mode: "auto" }),
 };
+
+test("uses Home as the root route and loads durable onboarding", async () => {
+  window.history.replaceState({}, "", "/");
+  render(<App client={client} />);
+
+  expect(await screen.findByRole("button", { name: "Buka detail performa" })).toBeVisible();
+  expect(screen.getByRole("button", { name: "Lanjutkan proyek" })).toBeVisible();
+});
+
+test("opens performance settings without selecting a project", async () => {
+  window.history.replaceState({}, "", "/settings");
+  render(<App client={client} />);
+
+  expect(await screen.findByRole("radio", { name: "Gunakan GPU" })).toBeVisible();
+});
+
+test("returns from performance setup to Home", async () => {
+  const user = userEvent.setup();
+  window.history.replaceState({}, "", "/settings");
+  render(<App client={client} />);
+
+  await user.click(await screen.findByRole("button", { name: "Kembali ke Home" }));
+
+  expect(await screen.findByRole("button", { name: "Buka detail performa" })).toBeVisible();
+});
 
 test("starts in Indonesian and makes face selection visible before approval", async () => {
   const user = userEvent.setup();
+  window.history.replaceState({}, "", "/projects/project-1");
   render(<App client={client} />);
 
-  expect(await screen.findByText("Perpustakaan proyek")).toBeInTheDocument();
-  expect(screen.getByText("Pilih subjek")).toBeInTheDocument();
+  expect(await screen.findByText("PERPUSTAKAAN PROYEK")).toBeInTheDocument();
+  expect(await screen.findByRole("button", { name: "Pilih subjek" })).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Setujui pratinjau" })).toBeDisabled();
 
   await user.click(screen.getByRole("button", { name: "EN" }));
-  expect(screen.getByText("Project library")).toBeInTheDocument();
+  expect(screen.getByText("PROJECT LIBRARY")).toBeInTheDocument();
 });

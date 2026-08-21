@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import hashlib
+import io
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 
+from autoclip.utils.ffmpeg import EncoderCapability
 from autoclip.web.acceleration import ResolvedAcceleration
 from autoclip.web.model_catalog import ModelPlan
+from autoclip.web.model_manager import ModelManager
 
 
 @dataclass
@@ -92,6 +96,14 @@ class FakeDetectorFactory:
 
 def all_models_available(_: str) -> bool:
     return True
+
+
+def _zip_bytes(files: dict[str, bytes]) -> bytes:
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w") as archive:
+        for name, payload in files.items():
+            archive.writestr(name, payload)
+    return output.getvalue()
 
 
 def test_mediapipe_gpu_probe_never_reports_cpu_as_gpu() -> None:
@@ -217,6 +229,42 @@ def test_default_model_cache_check_validates_size_and_sha256(
     assert manager.status().engine("yunet_cpu").state == "missing"
 
 
+def test_cached_archive_detector_model_is_ready(
+    monkeypatch: object,
+    tmp_path: object,
+) -> None:
+    import autoclip.web.model_manager as model_manager
+
+    from autoclip.web.acceleration_manager import AccelerationManager
+
+    monkeypatch = monkeypatch  # type: ignore[assignment]
+    tmp_path = Path(str(tmp_path))
+    detector_payload = b"scrfd-detector-only"
+    archive_payload = _zip_bytes({"scrfd.onnx": detector_payload})
+    plan = ModelPlan(
+        id="insightface_antelopev2_scrfd",
+        label="fixture",
+        source_url="https://example.invalid/scrfd.zip",
+        sha256=hashlib.sha256(archive_payload).hexdigest(),
+        bytes=len(archive_payload),
+        license="research",
+        research_only=True,
+        destination_relative_path="insightface/scrfd.onnx",
+        archive_member="scrfd.onnx",
+    )
+    monkeypatch.setattr(model_manager, "MODEL_PLANS", {plan.id: plan})
+    installer = ModelManager(tmp_path, downloader=lambda _: iter((archive_payload,)))
+    installer.install(plan.id, True, lambda *_: None)
+    status = AccelerationManager(
+        probe=FakeProbe(),
+        detector_factory=FakeDetectorFactory(),
+        models_root=tmp_path,
+        model_plans={plan.id: plan},
+    ).status()
+
+    assert status.engine("scrfd_cpu").state == "ready"
+
+
 def test_live_status_contains_all_detector_families() -> None:
     from autoclip.web.acceleration_manager import AccelerationManager
 
@@ -236,3 +284,24 @@ def test_live_status_contains_all_detector_families() -> None:
         "retinaface_cpu",
         "retinaface_cuda",
     }
+
+
+def test_listed_nvenc_with_failed_live_encode_is_failed() -> None:
+    from autoclip.web.acceleration_manager import AccelerationManager
+
+    class SmokeFailProbe(FakeProbe):
+        def nvenc_smoke(self, encoder: str) -> EncoderCapability:
+            self.calls.append(f"nvenc_smoke:{encoder}")
+            return EncoderCapability.failed("No NVENC capable devices found")
+
+    probe = SmokeFailProbe()
+    status = AccelerationManager(
+        probe=probe,
+        detector_factory=FakeDetectorFactory(),
+        model_available=all_models_available,
+    ).status()
+
+    capability = status.encoder("h264_nvenc")
+    assert capability.state == "failed"
+    assert capability.reason == "No NVENC capable devices found"
+    assert "nvenc_smoke:h264_nvenc" in probe.calls

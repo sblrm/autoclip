@@ -115,6 +115,20 @@ autoclip init      # Buat config file
 autoclip config    # Tampilkan konfigurasi saat ini
 ```
 
+### GPU face tracking and NVENC
+
+Run `autoclip web`. Browser opens AutoClip Home automatically; Node, Vite, and manual CUDA checks are not needed to launch it. Home names only required blockers. Use **Perbaiki setup wajib** for the fixed local repair plan, then continue with **Mulai proyek**.
+
+Auto is valid on CPU: it selects a verified CPU tracker with `libx264` when GPU evidence is missing. Explicit GPU requires both live face-tracker inference and real `h264_nvenc` smoke output; it reports recovery steps instead of silently using CPU or a center crop. **Performa** now shows a direct **Setup GPU tracking** checklist with fixed install buttons for PyTorch CUDA 12.8, ONNX Runtime CUDA, and YuNet. Advanced Settings exposes explicit MediaPipe, YuNet, SCRFD, RetinaFace, and encoder choices.
+
+For a Windows RTX 5070, working PyTorch CUDA is enough; do not install CUDA Toolkit solely for AutoClip. Use the fixed buttons in **Setup GPU tracking**, restart if PyTorch asks for it, then select **Cek ulang GPU**. Live CUDA inference must pass before Auto selects `yunet_cuda`. FFmpeg NVENC also needs a successful real `h264_nvenc` encode smoke, not only an encoder-list match. Auto falls back to `libx264`; explicitly selected NVENC fails with `nvenc_error` when unusable.
+
+YuNet model assets are MIT. Optional InsightFace SCRFD and RetinaFace model assets are research-only/non-commercial and require acknowledgement before download. Detection stays local; AutoClip does not use face recognition or embeddings.
+
+```powershell
+autoclip web
+```
+
 
 ## 📁 Output Structure
 
@@ -204,6 +218,14 @@ poetry run ruff check autoclip/
 
 # Type check
 poetry run mypy autoclip/
+```
+
+Build browser assets only when developing or packaging a source checkout. End users run `autoclip web`; they do not run Vite.
+
+```powershell
+cd web
+npm.cmd ci
+npm.cmd run build
 ```
 
 ## 🗺️ Roadmap

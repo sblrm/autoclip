@@ -3,11 +3,27 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from pathlib import Path
 
 from autoclip.models.clip import Clip
 from autoclip.models.config import OutputConfig
-from autoclip.utils.ffmpeg import build_crop_filter, get_video_info, run_ffmpeg
+from autoclip.utils.ffmpeg import (
+    EncoderCapability,
+    VideoEncoding,
+    build_crop_filter,
+    get_video_info,
+    list_video_encoders,
+    resolve_video_encoding,
+    run_ffmpeg,
+    smoke_test_encoder,
+)
+from autoclip.web.acceleration import (
+    AccelerationSelection,
+    ResolvedAcceleration,
+    TrackerUnavailable,
+)
+from autoclip.web.acceleration_manager import AccelerationManager
 
 
 def create_clips(
@@ -51,7 +67,41 @@ def create_clips(
         and output_config.height > 0
     )
 
-    # Pre-compute static crop filter (used when tracker is off or as fallback)
+    resolved_acceleration: ResolvedAcceleration | None = None
+    if use_tracker:
+        status = AccelerationManager().status()
+        requested_engine = getattr(tracker_config, "engine", "auto")
+        try:
+            resolved_acceleration = status.resolve(
+                AccelerationSelection(
+                    tracker_engine=requested_engine,
+                    encoder_mode=output_config.encoder_mode,
+                ),
+            )
+        except TrackerUnavailable as error:
+            message = str(error)
+            if not message.startswith("tracker_error:"):
+                message = (
+                    f"tracker_error: engine={requested_engine} state=unavailable "
+                    f"reason={message}"
+                )
+            raise TrackerUnavailable(
+                f"{message}; repair=run 'autoclip web' and recheck acceleration",
+            ) from error
+
+    encoding = resolve_video_encoding(
+        output_config.encoder_mode,
+        _probe_encoder_capabilities(),
+    )
+    if resolved_acceleration is not None:
+        resolved_acceleration = ResolvedAcceleration(
+            tracker_engine=resolved_acceleration.tracker_engine,
+            encoder_mode=encoding.mode,
+            provider=resolved_acceleration.provider,
+            model_id=resolved_acceleration.model_id,
+        )
+
+    # Pre-compute static crop filter only for intentional tracker-disabled export.
     video_info = get_video_info(video_path)
     crop_filter = build_crop_filter(
         src_width=video_info.width,
@@ -79,6 +129,8 @@ def create_clips(
                     output_config=output_config,
                     tracker_config=tracker_config,
                     subtitle_path=subtitle_path,
+                    encoding=encoding,
+                    resolved_acceleration=resolved_acceleration,
                 )
             else:
                 _export_clip(
@@ -88,6 +140,7 @@ def create_clips(
                     crop_filter=crop_filter,
                     output_config=output_config,
                     subtitle_path=subtitle_path,
+                    encoding=encoding,
                     progress_cb=lambda pct: progress_callback(clip_num, len(clips), pct)
                     if progress_callback else None,
                 )
@@ -111,6 +164,8 @@ def _export_clip_tracked(
     output_config: OutputConfig,
     tracker_config,
     subtitle_path: Path | None = None,
+    encoding: VideoEncoding | None = None,
+    resolved_acceleration: ResolvedAcceleration | None = None,
 ) -> None:
     """Export a single clip using face-tracking smart crop."""
     try:
@@ -128,32 +183,15 @@ def _export_clip_tracked(
             sample_every_n_frames=getattr(tracker_config, "sample_every_n_frames", 15),
             use_mediapipe=getattr(tracker_config, "use_mediapipe", True),
             deadzone_fraction=getattr(tracker_config, "deadzone_fraction", 0.04),
+            encoding=encoding,
+            resolved_acceleration=resolved_acceleration,
         )
-    except ImportError:
-        # opencv-python or mediapipe not installed — fall back to static crop
-        import warnings
-        warnings.warn(
-            "Face tracking requires opencv-python and mediapipe. "
-            "Install them or disable tracker in config. Falling back to center-crop.",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-        from autoclip.utils.ffmpeg import build_crop_filter, get_video_info
-        video_info = get_video_info(video_path)
-        crop_filter = build_crop_filter(
-            src_width=video_info.width,
-            src_height=video_info.height,
-            target_width=output_config.width,
-            target_height=output_config.height,
-        )
-        _export_clip(
-            video_path=video_path,
-            clip=clip,
-            output_path=output_path,
-            crop_filter=crop_filter,
-            output_config=output_config,
-            subtitle_path=subtitle_path,
-        )
+    except ImportError as error:
+        engine = getattr(tracker_config, "engine", "auto")
+        raise TrackerUnavailable(
+            f"tracker_error: engine={engine} state=missing reason={error}; "
+            "repair=run 'autoclip web' and recheck acceleration",
+        ) from error
 
 
 def _export_clip(
@@ -164,6 +202,7 @@ def _export_clip(
     output_config: OutputConfig,
     subtitle_path: Path | None = None,
     progress_cb=None,
+    encoding: VideoEncoding | None = None,
 ) -> None:
     """Export a single clip with FFmpeg."""
 
@@ -192,10 +231,13 @@ def _export_clip(
         else:
             ffmpeg_args += ["-vf", crop_filter]
 
-    ffmpeg_args += [
-        "-c:v", output_config.video_codec,
-        "-crf", str(output_config.crf),
-        "-preset", "fast",
+    if encoding is None:
+        encoding = VideoEncoding(
+            mode="libx264",
+            codec="libx264",
+            arguments=["-c:v", "libx264", "-crf", "23", "-preset", "medium"],
+        )
+    ffmpeg_args += encoding.arguments + [
         "-c:a", output_config.audio_codec,
         "-b:a", output_config.audio_bitrate,
         "-movflags", "+faststart",      # Enable streaming-friendly MP4
@@ -208,6 +250,19 @@ def _export_clip(
         progress_callback=progress_cb,
         duration=clip.duration,
     )
+
+
+def _probe_encoder_capabilities() -> Mapping[str, EncoderCapability]:
+    """Require one real FFmpeg encode before NVENC can be selected."""
+    listed = list_video_encoders()
+    capabilities: dict[str, EncoderCapability] = {}
+    for mode in ("h264_nvenc", "hevc_nvenc"):
+        capabilities[mode] = (
+            smoke_test_encoder(mode)
+            if mode in listed
+            else EncoderCapability.missing(f"{mode} is not listed by FFmpeg")
+        )
+    return capabilities
 
 
 def _build_output_path(output_dir: Path, clip_num: int, clip: Clip) -> Path:

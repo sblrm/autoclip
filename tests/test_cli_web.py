@@ -7,4 +7,4 @@ def test_web_command_exposes_the_guided_local_studio() -> None:
     result = CliRunner().invoke(app, ["web", "--help"])
 
     assert result.exit_code == 0
-    assert "Setup Center" in result.output
+    assert "packaged local Studio" in result.output

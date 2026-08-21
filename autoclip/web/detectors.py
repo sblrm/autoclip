@@ -172,7 +172,7 @@ class YuNetDecoder:
 
 
 class InsightFaceDecoder:
-    """Decode detector-only SCRFD/RetinaFace ONNX outputs."""
+    """Decode detector-only SCRFD/RetinaFace anchor-stride ONNX outputs."""
 
     def __init__(self, *, score_threshold: float = 0.5, nms_iou: float = 0.3) -> None:
         self.score_threshold = score_threshold
@@ -190,29 +190,27 @@ class InsightFaceDecoder:
         pad_y: float,
     ) -> list[FaceObservation]:
         arrays = [np.asarray(output) for output in outputs]
-        if len(arrays) < 6:
-            return YuNetDecoder(
-                score_threshold=self.score_threshold,
-                nms_iou=self.nms_iou,
-            ).decode(
-                arrays,
-                source_width=source_width,
-                source_height=source_height,
-                scale=scale,
-                pad_x=pad_x,
-                pad_y=pad_y,
-            )
+        if len(arrays) not in (6, 9):
+            raise ValueError("InsightFace detector outputs require three score and bbox tensors")
 
-        feature_count = len(arrays) // 3 if len(arrays) >= 9 else len(arrays) // 2
-        scores = arrays[:feature_count]
-        distances = arrays[feature_count : feature_count * 2]
-        strides = (8, 16, 32)[:feature_count]
+        scores = arrays[:3]
+        distances = arrays[3:6]
+        strides = (8, 16, 32)
         boxes: list[_Box] = []
         for score_output, distance_output, stride in zip(scores, distances, strides):
-            score_rows = score_output.reshape(-1)
-            distance_rows = distance_output.reshape(-1, 4)
-            feature_width = max(1, input_size // stride)
-            anchors_per_cell = max(1, len(score_rows) // max(1, feature_width * feature_width))
+            try:
+                score_rows = score_output.reshape(-1)
+                distance_rows = distance_output.reshape(-1, 4)
+            except ValueError as exc:
+                raise ValueError("InsightFace detector outputs have invalid score or bbox shapes") from exc
+            feature_width = input_size // stride
+            cells = feature_width * feature_width
+            if (
+                len(score_rows) not in (cells, cells * 2)
+                or len(distance_rows) != len(score_rows)
+            ):
+                raise ValueError("InsightFace detector outputs do not match anchor-stride layout")
+            anchors_per_cell = len(score_rows) // cells
             for index, (score, distance) in enumerate(zip(score_rows, distance_rows)):
                 confidence = float(score)
                 if confidence < self.score_threshold:
@@ -272,9 +270,12 @@ class _OnnxDetector:
         if self._last_timestamp_ms is not None and timestamp_ms < self._last_timestamp_ms:
             raise ValueError("timestamp_ms must be monotonic")
         self._last_timestamp_ms = timestamp_ms
-        letterbox = _letterbox(frame_bgr, self.input_size)
+        letterbox = self._preprocess(frame_bgr)
         outputs = self._session.run(None, {self._input_name: letterbox.tensor})
         return outputs, letterbox
+
+    def _preprocess(self, frame_bgr: NDArray[np.uint8]) -> _Letterbox:
+        return _letterbox(frame_bgr, self.input_size)
 
 
 class YuNetOnnxDetector(_OnnxDetector):
@@ -315,6 +316,9 @@ class InsightFaceOnnxDetector(_OnnxDetector):
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self._decoder = InsightFaceDecoder()
+
+    def _preprocess(self, frame_bgr: NDArray[np.uint8]) -> _Letterbox:
+        return _letterbox(frame_bgr, self.input_size, normalization="insightface")
 
     def detect(
         self,
@@ -402,7 +406,12 @@ def _require_provider(resolution: ResolvedAcceleration, expected_provider: str) 
         raise TrackerUnavailable(f"{resolution.tracker_engine} requires {expected_provider}")
 
 
-def _letterbox(frame_bgr: NDArray[np.uint8], input_size: int) -> _Letterbox:
+def _letterbox(
+    frame_bgr: NDArray[np.uint8],
+    input_size: int,
+    *,
+    normalization: str = "yunet",
+) -> _Letterbox:
     if frame_bgr.ndim != 3 or frame_bgr.shape[2] != 3:
         raise ValueError("frame_bgr must have shape (height, width, 3)")
     source_height, source_width = frame_bgr.shape[:2]
@@ -417,7 +426,13 @@ def _letterbox(frame_bgr: NDArray[np.uint8], input_size: int) -> _Letterbox:
     canvas = np.zeros((input_size, input_size, 3), dtype=np.uint8)
     canvas[pad_y : pad_y + resized_height, pad_x : pad_x + resized_width] = resized
     rgb = canvas[:, :, ::-1]
-    tensor = np.ascontiguousarray(rgb.transpose(2, 0, 1)[None], dtype=np.float32) / 255.0
+    tensor = np.ascontiguousarray(rgb.transpose(2, 0, 1)[None], dtype=np.float32)
+    if normalization == "yunet":
+        tensor /= 255.0
+    elif normalization == "insightface":
+        tensor = (tensor - 127.5) / 128.0
+    else:
+        raise ValueError(f"unknown detector normalization: {normalization}")
     return _Letterbox(tensor=tensor, scale=scale, pad_x=float(pad_x), pad_y=float(pad_y))
 
 
